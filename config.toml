@@ -1,0 +1,12 @@
+# The server owns all clocks, rules, rooms and hidden ranks. Nothing is persisted.
+bind = "0.0.0.0:4000"
+placement_seconds = 120
+move_seconds = 5
+# Three consecutive missed turns lose the game.
+max_missed_turns = 3
+# Draw after this many moves without a capture (prevents endless repetition).
+quiet_move_limit = 200
+max_rooms = 128
+max_connections = 256
+# Unmatched rooms expire, so abandoned lobbies cannot accumulate.
+waiting_seconds = 600

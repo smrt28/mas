@@ -1,0 +1,29 @@
+[package]
+name = "marsal-a-spion"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["client"]
+client = ["dep:bevy"]
+# Enables live TCP integration tests; needs permission to bind localhost sockets.
+network-tests = []
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+rand = "0.9"
+bevy = { version = "0.18.1", optional = true, default-features = false, features = ["std", "async_executor", "bevy_asset", "bevy_color", "bevy_core_pipeline", "bevy_image", "bevy_render", "bevy_camera", "bevy_shader", "bevy_mesh", "bevy_sprite", "bevy_sprite_render", "bevy_text", "bevy_window", "bevy_winit", "default_font", "multi_threaded", "png", "x11", "wayland"] }
+
+[[bin]]
+name = "mas-server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "mas-client"
+path = "src/bin/client.rs"
+required-features = ["client"]
+
+[profile.dev]
+debug = 0
