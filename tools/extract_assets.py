@@ -14,26 +14,15 @@ from PIL import Image
 
 OUT = pathlib.Path('assets')
 PLAN = pathlib.Path('tmp/mas-plan.pdf')
-# Printed gridline centres: 10 columns, 11 rows. Cropping to these centres makes
-# the printed cell centres agree with the client's evenly spaced hit targets.
-BOARD = (10, 235, 1410, 1775)
-
-
-
 def extract():
     OUT.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         subprocess.run(['pdftoppm', '-scale-to', '4912', '-png', '-singlefile',
                         str(PLAN), tmp+'/plan'], check=True)
         plan = Image.open(tmp+'/plan.png').convert('RGB')
-        scale = plan.height / 2000
-
-        def crop(box):
-            return plan.crop(tuple(round(v * scale) for v in box))
-
-        # Store at 2x the UI's resolution, retaining the printed red/white grid,
-        # landscape and both uninterrupted 1x3 flag panels.
-        crop(BOARD).resize((1200, 1320), Image.Resampling.LANCZOS).save(OUT/'board.png')
+        # Preserve the entire page, including both printed rank legends. The
+        # client fits this sheet at the PDF page aspect below a fixed 40px bar.
+        plan.resize((1200, 1681), Image.Resampling.LANCZOS).save(OUT/'board.png')
         # cover.png is a manually reviewed AI restoration. Do not overwrite it
         # with the raw scan. A fresh extraction must rotate clockwise to place
         # the rider upright on the left and the title on the right.

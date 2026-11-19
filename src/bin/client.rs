@@ -3,7 +3,7 @@ use bevy::{
     prelude::*,
     sprite::Anchor,
 };
-use marsal_a_spion::{net, *};
+use marsal_a_spion::{net, plan, *};
 use std::{
     io::BufReader,
     net::{Shutdown, TcpStream, ToSocketAddrs},
@@ -15,11 +15,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const CELL: f32 = 60.;
-const BOARD_WIDTH: f32 = COLS as f32 * CELL;
-const BOARD_HEIGHT: f32 = ROWS as f32 * CELL;
-const LEFT: f32 = -570.;
-const TOP: f32 = 290.;
 const LOGIN_X: f32 = 385.;
 const LOGIN_WIDTH: f32 = 350.;
 const LOGIN_FIELD_HEIGHT: f32 = 36.;
@@ -30,6 +25,11 @@ const LOGIN_ENTER_Y: f32 = -346.;
 struct Painted;
 #[derive(Component)]
 struct Clock;
+#[derive(Resource, Default)]
+struct Surface {
+    layout: plan::Layout,
+    playing: Option<bool>,
+}
 #[derive(Resource)]
 struct Offscreen(Handle<Image>);
 #[derive(Resource)]
@@ -60,21 +60,30 @@ struct Client {
     selected: Option<usize>,
     rank: Rank,
     dirty: bool,
-    help: bool,
+    ready_sent: bool,
     preview: bool,
     session: u64,
 }
 impl Client {
-    fn send(&mut self, a: Action) {
+    fn send(&mut self, a: Action) -> bool {
         self.error.clear();
-        if let Some(tx) = &self.tx {
+        let sent = if let Some(tx) = &self.tx {
             if tx.try_send(a).is_err() {
                 self.error = "Connection busy or closed".into();
+                false
+            } else {
+                true
             }
-        } else if self.preview {
-            self.error = "Artwork preview. Restart without --preview to play online.".into();
-        }
+        } else {
+            self.error = if self.preview {
+                "Offline preview. Restart without --preview to play.".into()
+            } else {
+                "Disconnected. Click the info bar to return.".into()
+            };
+            false
+        };
         self.dirty = true;
+        sent
     }
     fn leave(&mut self) {
         self.session += 1;
@@ -84,6 +93,7 @@ impl Client {
         self.tx = None;
         self.view = None;
         self.selected = None;
+        self.ready_sent = false;
         self.connecting = false;
         self.dirty = true;
     }
@@ -181,7 +191,6 @@ fn main() {
         let cfg = Config::default();
         let mut g = Game::new(0, &cfg);
         g.start(0, &cfg);
-        let _ = g.apply(0, Action::AutoPlace, 0, &cfg);
         view = Some(g.view(0, "Artwork preview", 0));
     }
     let address = args
@@ -208,9 +217,9 @@ fn main() {
         received: Instant::now(),
         error: String::new(),
         selected: None,
-        rank: Rank::Marshal,
+        rank: Rank::Flag,
         dirty: true,
-        help: false,
+        ready_sent: false,
         preview,
         session: 0,
     };
@@ -220,6 +229,7 @@ fn main() {
     let headless = args.iter().any(|a| a == "--headless");
     let mut app = App::new();
     app.insert_resource(client)
+        .init_resource::<Surface>()
         .insert_resource(ClearColor(Color::srgb(0.055, 0.065, 0.07)));
     let plugins = DefaultPlugins.set(AssetPlugin {
         file_path: format!("{}/assets", env!("CARGO_MANIFEST_DIR")),
@@ -242,8 +252,17 @@ fn main() {
         app.add_plugins(plugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Maršál a špión | Field command".into(),
-                resolution: (1280, 900).into(),
-                resizable: false,
+                resolution: if preview {
+                    (plan::WIDTH, plan::WINDOW_HEIGHT).into()
+                } else {
+                    (1280, 900).into()
+                },
+                resizable: preview,
+                resize_constraints: WindowResizeConstraints {
+                    min_width: 360.,
+                    min_height: 480.,
+                    ..default()
+                },
                 ..default()
             }),
             ..default()
@@ -252,15 +271,24 @@ fn main() {
     app.add_systems(Startup, setup)
         .add_systems(
             Update,
-            (receive, input, paint, clock_text, screenshot).chain(),
+            (receive, fit_surface, input, paint, clock_text, screenshot).chain(),
         )
         .run();
 }
-fn setup(mut commands: Commands, assets: Res<AssetServer>, mut images: ResMut<Assets<Image>>) {
+fn setup(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    mut images: ResMut<Assets<Image>>,
+    c: Res<Client>,
+) {
     if std::env::args().any(|a| a == "--headless") {
         let mut image = Image::new_target_texture(
-            1280,
-            900,
+            if c.view.is_some() { plan::WIDTH } else { 1280 },
+            if c.view.is_some() {
+                plan::WINDOW_HEIGHT
+            } else {
+                900
+            },
             bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
             None,
         );
@@ -285,6 +313,56 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, mut images: ResMut<As
     });
 }
 
+fn fit_surface(
+    mut c: ResMut<Client>,
+    mut surface: ResMut<Surface>,
+    mut window: Option<Single<&mut Window>>,
+    offscreen: Option<Res<Offscreen>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let playing = c.view.is_some();
+    let initial_size = if playing {
+        (plan::WIDTH, plan::WINDOW_HEIGHT)
+    } else {
+        (1280, 900)
+    };
+    // Set a sensible initial size only when entering/leaving a game. Continuous
+    // updates must observe the user's resize, never reset it on the next frame.
+    if surface.playing != Some(playing) {
+        if let Some(window) = window.as_mut() {
+            window
+                .resolution
+                .set(initial_size.0 as f32, initial_size.1 as f32);
+            window.resizable = playing;
+        }
+        if let Some(target) = &offscreen
+            && let Some(image) = images.get_mut(&target.0)
+        {
+            image.resize(bevy::render::render_resource::Extent3d {
+                width: initial_size.0,
+                height: initial_size.1,
+                depth_or_array_layers: 1,
+            });
+        }
+        surface.playing = Some(playing);
+        c.dirty = true;
+    }
+    let (w, h) = if let Some(window) = window.as_ref() {
+        (window.width(), window.height())
+    } else if let Some(target) = &offscreen
+        && let Some(image) = images.get(&target.0)
+    {
+        (image.width() as f32, image.height() as f32)
+    } else {
+        (initial_size.0 as f32, initial_size.1 as f32)
+    };
+    let layout = plan::Layout::new(w, h);
+    if surface.layout != layout {
+        surface.layout = layout;
+        c.dirty = true;
+    }
+}
+
 fn receive(mut c: ResMut<Client>) {
     let events: Vec<_> = c.events.lock().unwrap().try_iter().collect();
     for (session, event) in events {
@@ -300,9 +378,35 @@ fn receive(mut c: ResMut<Client>) {
                 c.send(Action::Join { game: name });
             }
             Event::Reply(Reply::State { view }) => {
+                let lock = matches!(view.phase, Phase::Placement)
+                    && !view.ready[view.you]
+                    && view.reserve.iter().all(|(_, n)| *n == 0)
+                    && !c.ready_sent;
+                if matches!(view.phase, Phase::Placement)
+                    && view
+                        .reserve
+                        .iter()
+                        .find(|(r, _)| *r == c.rank)
+                        .is_some_and(|(_, n)| *n == 0)
+                    && let Some(rank) = plan::STRIP
+                        .into_iter()
+                        .find(|r| view.reserve.iter().any(|(vr, n)| vr == r && *n > 0))
+                {
+                    c.rank = rank;
+                }
+                if c.view
+                    .as_ref()
+                    .is_some_and(|old| old.turn != view.turn || old.phase != view.phase)
+                {
+                    c.selected = None;
+                    c.error.clear();
+                }
                 c.view = Some(view);
                 c.received = Instant::now();
                 c.dirty = true;
+                if lock {
+                    c.ready_sent = c.send(Action::Ready);
+                }
             }
             Event::Reply(Reply::Error { message }) => {
                 c.error = message;
@@ -325,19 +429,10 @@ fn input(
     mouse: Res<ButtonInput<MouseButton>>,
     mut text: MessageReader<KeyboardInput>,
     window: Option<Single<&Window>>,
-    camera: Single<(&Camera, &GlobalTransform)>,
+    surface: Res<Surface>,
 ) {
-    if keys.just_pressed(KeyCode::F1) {
-        c.help = !c.help;
-        c.dirty = true;
-    }
     if keys.just_pressed(KeyCode::Escape) {
-        if c.help {
-            c.help = false;
-            c.dirty = true;
-        } else {
-            c.leave();
-        }
+        c.leave();
     }
     if c.view.is_none() {
         for event in text.read() {
@@ -357,9 +452,7 @@ fn input(
                     }
                     c.dirty = true;
                 }
-                Key::Enter if !c.connecting => {
-                    c.connect();
-                }
+                Key::Enter if !c.connecting => c.connect(),
                 Key::Character(s) if !c.connecting && !s.chars().any(char::is_control) => {
                     let field = if c.field == 0 {
                         &mut c.address
@@ -377,18 +470,16 @@ fn input(
     } else {
         text.clear();
     }
-    if c.help {
-        return;
-    }
     let Some(window) = window else {
         return;
     };
     let Some(cursor) = window.cursor_position() else {
         return;
     };
-    let Ok(pos) = camera.0.viewport_to_world_2d(camera.1, cursor) else {
-        return;
-    };
+    // Use the current logical window size, rather than a camera projection
+    // cached before this frame's resize. The UI camera stays at the origin.
+    let cursor_point = surface.layout.cursor(cursor.x, cursor.y);
+    let pos = Vec2::new(cursor_point.x, cursor_point.y);
     let clicked = mouse.just_pressed(MouseButton::Left);
     let right = mouse.just_pressed(MouseButton::Right);
     if c.view.is_none() {
@@ -413,48 +504,60 @@ fn input(
         }
         return;
     }
+    if !clicked && !right {
+        return;
+    }
     let v = c.view.as_ref().unwrap().clone();
-    if clicked && hit(pos, 380., -375., 330., 36.) {
-        c.help = true;
-        c.dirty = true;
+    let point = plan::Point { x: pos.x, y: pos.y };
+    if surface.layout.in_bar(point) {
+        if clicked && (matches!(v.phase, Phase::Finished { .. }) || c.tx.is_none() && !c.preview) {
+            c.leave();
+        } else if right && !matches!(v.phase, Phase::Finished { .. }) {
+            c.send(Action::Resign);
+        }
         return;
     }
-    if clicked && hit(pos, 380., -420., 330., 30.) {
-        c.send(Action::Resign);
-        return;
-    }
-    if matches!(v.phase, Phase::Placement) && clicked {
-        for (i, r) in Rank::ALL.into_iter().enumerate() {
-            if hit(pos, 380., 208. - i as f32 * 35., 330., 32.) {
-                c.rank = r;
+    if matches!(v.phase, Phase::Placement) && !v.ready[v.you] && !c.ready_sent {
+        if clicked && let Some(rank) = surface.layout.pick_rank(point, v.you) {
+            if v.reserve.iter().any(|(r, n)| *r == rank && *n > 0) {
+                c.rank = rank;
+                c.error.clear();
+            } else {
+                c.error = format!("All {} pieces are already deployed.", rank.name());
+            }
+            c.dirty = true;
+            return;
+        }
+        if let Some(at) = surface.layout.pick_cell(point, v.you) {
+            if !home(v.you, at) {
+                c.error = "Deploy in your bottom four rows.".into();
                 c.dirty = true;
                 return;
             }
-        }
-        if hit(pos, 292., -207., 155., 40.) {
-            c.send(Action::AutoPlace);
-            return;
-        }
-        if hit(pos, 468., -207., 155., 40.) {
-            c.send(Action::Ready);
-            return;
-        }
-    }
-    let col = ((pos.x - LEFT) / CELL).floor() as i32;
-    let row = ((TOP + CELL / 2. - pos.y) / CELL).floor() as i32;
-    if !(0..COLS as i32).contains(&col) || !(0..ROWS as i32).contains(&row) {
-        return;
-    }
-    let screen = row as usize * COLS + col as usize;
-    let at = orient(screen, v.you);
-    if matches!(v.phase, Phase::Placement) {
-        if right {
-            c.send(Action::Remove { at });
-        } else if clicked {
-            let rank = c.rank;
-            c.send(Action::Place { at, rank });
+            if right {
+                c.send(Action::Remove { at });
+            } else if v.board[at].is_some() {
+                c.error = "Right-click a placed piece to return it to the strip.".into();
+                c.dirty = true;
+            } else {
+                let rank = c.rank;
+                c.send(Action::Place { at, rank });
+            }
         }
     } else if matches!(v.phase, Phase::Playing) && clicked {
+        let Some(at) = surface.layout.pick_cell(point, v.you) else {
+            return;
+        };
+        if v.turn != v.you {
+            c.error = "Waiting for your opponent.".into();
+            c.dirty = true;
+            return;
+        }
+        if c.selected == Some(at) {
+            c.selected = None;
+            c.dirty = true;
+            return;
+        }
         if v.board[at]
             .as_ref()
             .is_some_and(|p| p.owner == v.you && p.rank.is_some_and(Rank::mobile))
@@ -462,9 +565,14 @@ fn input(
             c.error.clear();
             c.selected = Some(at);
             c.dirty = true;
-        } else if let Some(from) = c.selected.take() {
-            c.error.clear();
-            c.send(Action::Move { from, to: at });
+        } else if let Some(from) = c.selected {
+            if v.legal_targets(from).contains(&at) {
+                c.selected = None;
+                c.send(Action::Move { from, to: at });
+            } else {
+                c.error = "Choose a highlighted destination.".into();
+                c.dirty = true;
+            }
         }
     }
 }
@@ -535,11 +643,51 @@ fn button(cmd: &mut Commands, art: &Art, s: &str, x: f32, y: f32, w: f32, active
         Color::srgb(0.96, 0.90, 0.75),
     );
 }
+fn border(cmd: &mut Commands, x: f32, y: f32, w: f32, h: f32, z: f32, color: Color) {
+    let stroke = w.min(h) / 25.;
+    for (dx, dy, width, height) in [
+        (0., h / 2. - stroke / 2., w, stroke),
+        (0., -h / 2. + stroke / 2., w, stroke),
+        (-w / 2. + stroke / 2., 0., stroke, h),
+        (w / 2. - stroke / 2., 0., stroke, h),
+    ] {
+        rect(cmd, x + dx, y + dy, width, height, z, color);
+    }
+}
+fn printed_rect(
+    cmd: &mut Commands,
+    area: plan::Rect,
+    you: usize,
+    z: f32,
+    color: Color,
+    outline: bool,
+    layout: plan::Layout,
+) {
+    let point = layout.world(area.center(), you);
+    let w = area.width / plan::PAGE_WIDTH * layout.board_width;
+    let h = area.height / plan::PAGE_HEIGHT * layout.board_height;
+    if outline {
+        border(cmd, point.x, point.y, w, h, z, color);
+    } else {
+        rect(cmd, point.x, point.y, w, h, z, color);
+    }
+}
+fn shortened(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.into()
+    } else {
+        s.chars()
+            .take(max - 1)
+            .chain(std::iter::once('…'))
+            .collect()
+    }
+}
 fn paint(
     mut cmd: Commands,
     mut c: ResMut<Client>,
     art: Res<Art>,
     old: Query<Entity, With<Painted>>,
+    surface: Res<Surface>,
 ) {
     if !c.dirty {
         return;
@@ -549,24 +697,8 @@ fn paint(
         cmd.entity(e).despawn();
     }
     let ink = Color::srgb(0.94, 0.88, 0.74);
-    let muted = Color::srgb(0.61, 0.66, 0.64);
     let gold = Color::srgb(0.94, 0.67, 0.32);
-    if c.view.is_some() {
-        label(&mut cmd, &art, "MARŠÁL A ŠPIÓN", -575., 402., 36., ink);
-        label(
-            &mut cmd,
-            &art,
-            "HIDDEN ARMIES  /  OPEN POSSIBILITIES",
-            -572.,
-            365.,
-            13.,
-            muted,
-        );
-        label(&mut cmd, &art, "F1  Field manual", 395., 402., 15., muted);
-    }
-    if c.view.is_none() {
-        // The cover carries the title. Keep the login below the title and to
-        // the right of the horse, preserving the artwork's aspect ratio.
+    let Some(v) = &c.view else {
         picture(
             &mut cmd,
             art.cover.clone(),
@@ -614,7 +746,6 @@ fn paint(
                 16.,
                 ink,
             );
-            // Show the end of long input without letting it spill over the art.
             let tail: String = value
                 .chars()
                 .rev()
@@ -651,390 +782,311 @@ fn paint(
             label(
                 &mut cmd,
                 &art,
-                wrap(&c.error, 44),
+                shortened(&c.error, 44),
                 LOGIN_X - LOGIN_WIDTH / 2.,
                 -414.,
                 13.,
                 gold,
             );
         }
-    } else if let Some(v) = &c.view {
-        label(
-            &mut cmd,
-            &art,
-            format!("{}  /  Commander {}", v.game, v.you + 1),
-            -570.,
-            329.,
-            17.,
-            gold,
-        );
-        let mut board_transform = Transform::from_xyz(
-            LEFT + BOARD_WIDTH / 2.,
-            TOP + CELL / 2. - BOARD_HEIGHT / 2.,
-            0.,
-        );
-        if v.you == 1 {
-            board_transform.rotation = Quat::from_rotation_z(std::f32::consts::PI);
+        return;
+    };
+    let layout = surface.layout;
+    let scale = layout.scale;
+    // The entire plan is the content: both printed legends, the grid and flags.
+    let mut transform = Transform::from_xyz(0., -(plan::BAR_HEIGHT as f32) / 2., 0.);
+    if v.you == 1 {
+        transform.rotation = Quat::from_rotation_z(std::f32::consts::PI);
+    }
+    cmd.spawn((
+        Painted,
+        Sprite {
+            image: art.board.clone(),
+            custom_size: Some(Vec2::new(layout.board_width, layout.board_height)),
+            ..default()
+        },
+        transform,
+    ));
+    let targets = c
+        .selected
+        .map(|from| v.legal_targets(from))
+        .unwrap_or_default();
+    for at in 0..CELLS {
+        if blocked(at) {
+            continue;
         }
-        cmd.spawn((
-            Painted,
-            Sprite {
-                image: art.board.clone(),
-                custom_size: Some(Vec2::new(BOARD_WIDTH, BOARD_HEIGHT)),
-                ..default()
-            },
-            board_transform,
-        ));
-        let targets = c
-            .selected
-            .map(|from| v.legal_targets(from))
-            .unwrap_or_default();
-        for screen in 0..CELLS {
-            let at = orient(screen, v.you);
-            let x = LEFT + (screen % COLS) as f32 * CELL + CELL / 2.;
-            let y = TOP - (screen / COLS) as f32 * CELL;
-            // The printed flag panels span three rows each. Leave their art
-            // uninterrupted; neither cells nor piece hit targets can enter them.
-            if blocked(at) {
-                continue;
-            }
-            if targets.contains(&at) {
-                rect(
-                    &mut cmd,
-                    x,
-                    y,
-                    56.,
-                    56.,
-                    2.,
-                    Color::srgba(0.25, 0.65, 0.52, 0.8),
-                );
-            }
-            if c.selected == Some(at) {
-                rect(&mut cmd, x, y, 58., 58., 2., gold);
-            }
-            if let Some(p) = &v.board[at] {
-                let friendly = p.owner == v.you;
-                rect(
-                    &mut cmd,
-                    x + 2.,
-                    y - 2.,
-                    50.,
-                    54.,
-                    2.5,
-                    Color::srgba(0.10, 0.07, 0.04, 0.45),
-                );
-                rect(&mut cmd, x, y, 50., 54., 3., Color::srgb(0.52, 0.37, 0.19));
-                rect(
-                    &mut cmd,
-                    x,
-                    y,
-                    47.,
-                    51.,
-                    3.5,
-                    if friendly {
-                        Color::srgb(0.96, 0.92, 0.81)
-                    } else {
-                        Color::srgb(0.65, 0.24, 0.18)
-                    },
-                );
-                if let Some(rank) = p.rank {
-                    picture(
-                        &mut cmd,
-                        art.ranks[rank as usize].clone(),
-                        x,
-                        y + 5.,
-                        40.,
-                        40.,
-                        4.,
-                    );
-                    label(
-                        &mut cmd,
-                        &art,
-                        rank.short(),
-                        x - 17.,
-                        y - 18.,
-                        11.,
-                        Color::srgb(0.12, 0.13, 0.12),
-                    );
-                } else {
-                    label(&mut cmd, &art, "?", x - 9., y + 1., 27., ink);
-                }
-            }
-        }
-        for col in 0..COLS {
-            let at = orient(col, v.you);
-            label(
+        let area = plan::cell(at);
+        let point = layout.world(area.center(), v.you);
+        let w = area.width / plan::PAGE_WIDTH * layout.board_width;
+        let h = area.height / plan::PAGE_HEIGHT * layout.board_height;
+        if targets.contains(&at) {
+            border(
                 &mut cmd,
-                &art,
-                ((b'A' + (at % COLS) as u8) as char).to_string(),
-                LEFT + col as f32 * CELL + CELL / 2. - 5.,
-                TOP + CELL / 2. - BOARD_HEIGHT - 17.,
-                12.,
-                muted,
+                point.x,
+                point.y,
+                w - 6. * scale,
+                h - 6. * scale,
+                2.,
+                Color::srgb(0.2, 0.85, 0.5),
             );
         }
-        for row in 0..ROWS {
-            let at = orient(row * COLS, v.you);
-            label(
+        if c.selected == Some(at) {
+            border(
                 &mut cmd,
-                &art,
-                (ROWS - at / COLS).to_string(),
-                LEFT - 28.,
-                TOP - row as f32 * CELL,
-                12.,
-                muted,
+                point.x,
+                point.y,
+                w - 4. * scale,
+                h - 4. * scale,
+                2.,
+                gold,
             );
         }
-        let status: String = match &v.phase {
-            Phase::Waiting => "AWAITING OPPONENT".into(),
-            Phase::Placement => {
-                if v.ready[v.you] {
-                    "DEPLOYMENT LOCKED".into()
-                } else {
-                    "DEPLOY YOUR ARMY".into()
-                }
+        if let Some(piece) = &v.board[at] {
+            let face = if piece.owner == 0 {
+                Color::srgb(0.87, 0.36, 0.28)
+            } else {
+                Color::srgb(0.96, 0.94, 0.87)
+            };
+            rect(
+                &mut cmd,
+                point.x + 1.5 * scale,
+                point.y - 1.5 * scale,
+                w - 10. * scale,
+                h - 8. * scale,
+                2.5,
+                Color::srgba(0.1, 0.07, 0.04, 0.4),
+            );
+            rect(
+                &mut cmd,
+                point.x,
+                point.y,
+                w - 10. * scale,
+                h - 8. * scale,
+                3.,
+                face,
+            );
+            border(
+                &mut cmd,
+                point.x,
+                point.y,
+                w - 10. * scale,
+                h - 8. * scale,
+                3.5,
+                Color::srgb(0.42, 0.29, 0.17),
+            );
+            if let Some(rank) = piece.rank {
+                let size = w.min(h) - 15. * scale;
+                picture(
+                    &mut cmd,
+                    art.ranks[rank as usize].clone(),
+                    point.x,
+                    point.y,
+                    size,
+                    size,
+                    4.,
+                );
+            } else {
+                label(
+                    &mut cmd,
+                    &art,
+                    "?",
+                    point.x - 7. * scale,
+                    point.y,
+                    24. * scale,
+                    Color::srgb(0.18, 0.13, 0.1),
+                );
             }
-            Phase::Playing => {
-                if v.turn == v.you {
-                    "YOUR MOVE".into()
-                } else {
-                    "OPPONENT'S MOVE".into()
-                }
+        }
+    }
+    if matches!(v.phase, Phase::Placement) {
+        for (rank, count) in &v.reserve {
+            let card = plan::card(*rank, v.you);
+            if *count == 0 {
+                printed_rect(
+                    &mut cmd,
+                    card,
+                    v.you,
+                    1.,
+                    Color::srgba(0.04, 0.03, 0.02, 0.4),
+                    false,
+                    layout,
+                );
             }
-            Phase::Finished { winner, .. } => match winner {
-                Some(p) if *p == v.you => "VICTORY".into(),
-                Some(_) => "DEFEAT".into(),
-                None => "DRAW".into(),
-            },
-        };
-        label(&mut cmd, &art, status, 215., 330., 23., gold);
-        let clock = cmd
-            .spawn((
-                Painted,
-                Clock,
-                Text2d::new(""),
-                TextFont {
-                    font: art.font.clone(),
-                    font_size: 20.,
-                    ..default()
-                },
-                TextColor(ink),
-                Anchor::CENTER_LEFT,
-                Transform::from_xyz(215., 288., 8.),
-            ))
-            .id();
-        let _ = clock;
+            if *rank == c.rank && *count > 0 && !v.ready[v.you] {
+                printed_rect(&mut cmd, card, v.you, 2., gold, true, layout);
+            }
+            if *count != rank.count() {
+                // Replace only the printed inventory number, in the same place.
+                let source_count = if v.you == 0 {
+                    plan::Point {
+                        x: card.center().x,
+                        y: 1960.,
+                    }
+                } else {
+                    plan::Point {
+                        x: card.center().x,
+                        y: 48.,
+                    }
+                };
+                let point = layout.world(source_count, v.you);
+                let paper = if v.you == 0 {
+                    Color::srgb(0.87, 0.36, 0.28)
+                } else {
+                    Color::srgb(0.96, 0.94, 0.87)
+                };
+                rect(
+                    &mut cmd,
+                    point.x,
+                    point.y,
+                    27. * scale,
+                    17. * scale,
+                    3.,
+                    paper,
+                );
+                label(
+                    &mut cmd,
+                    &art,
+                    format!("{count}×"),
+                    point.x - 10. * scale,
+                    point.y,
+                    12. * scale,
+                    Color::BLACK,
+                );
+            }
+        }
+    }
+    // This is the only UI outside the original plan.
+    let top = layout.height / 2.;
+    rect(
+        &mut cmd,
+        0.,
+        top - plan::BAR_HEIGHT as f32 / 2.,
+        layout.width,
+        plan::BAR_HEIGHT as f32,
+        5.,
+        Color::srgb(0.07, 0.085, 0.085),
+    );
+    let status = if c.tx.is_none() && !c.preview {
+        "Disconnected · Click here to return".into()
+    } else {
         match &v.phase {
-            Phase::Waiting => {
-                label(
-                    &mut cmd,
-                    &art,
-                    "Share this game name:",
-                    215.,
-                    212.,
-                    18.,
-                    ink,
-                );
-                label(&mut cmd, &art, wrap(&v.game, 24), 215., 165., 24., gold);
-                label(
-                    &mut cmd,
-                    &art,
-                    "Deployment starts when the\nsecond commander joins.\n\nYour army stays hidden\nuntil the match begins.",
-                    215.,
-                    45.,
-                    18.,
-                    muted,
-                );
-            }
+            Phase::Waiting => format!("Waiting for opponent · {}", shortened(&v.game, 25)),
             Phase::Placement => {
-                label(
-                    &mut cmd,
-                    &art,
-                    "Select a rank, then click a home square.",
-                    215.,
-                    250.,
-                    15.,
-                    muted,
-                );
-                for (i, (rank, count)) in v.reserve.iter().enumerate() {
-                    let y = 208. - i as f32 * 35.;
-                    button(
-                        &mut cmd,
-                        &art,
-                        &format!("       {:<15} ×{}", rank.name(), count),
-                        380.,
-                        y,
-                        330.,
-                        c.rank == *rank,
-                    );
-                    picture(
-                        &mut cmd,
-                        art.ranks[*rank as usize].clone(),
-                        238.,
-                        y,
-                        26.,
-                        26.,
-                        7.,
-                    );
+                if v.ready[v.you] || c.ready_sent {
+                    "Army ready · Waiting for opponent".into()
+                } else {
+                    format!("Deploying · {}", shortened(&v.game, 25))
                 }
-                button(&mut cmd, &art, "Auto-fill", 292., -207., 155., false);
-                button(&mut cmd, &art, "Lock army", 468., -207., 155., true);
-                label(
-                    &mut cmd,
-                    &art,
-                    "Right-click to remove.\nAuto-fill preserves your placed pieces.\nThe clock fills and locks both armies.",
-                    215.,
-                    -270.,
-                    14.,
-                    muted,
-                );
             }
-            Phase::Playing => {
-                label(
-                    &mut cmd,
-                    &art,
-                    format!("Turn {}  /  missed turns: {}", v.ply + 1, v.missed[v.you]),
-                    215.,
-                    235.,
-                    15.,
-                    ink,
-                );
-                label(
-                    &mut cmd,
-                    &art,
-                    "Click your piece, then its destination.\nMove in 8 directions, attack in 4.\nScouts travel on clear straight lines.\nGreen squares are legal destinations.",
-                    215.,
-                    172.,
-                    15.,
-                    muted,
-                );
-                label(&mut cmd, &art, "FIELD REPORTS", 215., 84., 15., gold);
-                let reports = v
-                    .messages
-                    .iter()
-                    .rev()
-                    .take(4)
-                    .map(|s| wrap(s, 39))
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-                label(&mut cmd, &art, reports, 215., -45., 14., ink);
-                label(
-                    &mut cmd,
-                    &art,
+            Phase::Playing => format!(
+                "{} · {}",
+                if v.turn == v.you {
+                    "Your move"
+                } else {
+                    "Opponent's move"
+                },
+                shortened(&v.game, 25)
+            ),
+            Phase::Finished { winner, .. } => format!(
+                "{} · Click here to return",
+                match winner {
+                    Some(p) if *p == v.you => "Victory",
+                    Some(_) => "Defeat",
+                    None => "Draw",
+                }
+            ),
+        }
+    };
+    let detail = if !c.error.is_empty() {
+        c.error.clone()
+    } else {
+        match &v.phase {
+            Phase::Waiting => "Your game starts when the second player joins.".into(),
+            Phase::Placement => {
+                if v.ready[v.you] || c.ready_sent {
+                    "Both armies begin as soon as deployment is complete.".into()
+                } else {
+                    let count = v
+                        .reserve
+                        .iter()
+                        .find(|(r, _)| *r == c.rank)
+                        .map_or(0, |(_, n)| *n);
                     format!(
-                        "Captured: {}   /   Lost: {}",
-                        v.captured.iter().filter(|p| p.owner != v.you).count(),
-                        v.captured.iter().filter(|p| p.owner == v.you).count()
-                    ),
-                    215.,
-                    -238.,
-                    17.,
-                    muted,
-                );
+                        "{}: {count} left · Bottom four rows · Right-click removes",
+                        c.rank.name()
+                    )
+                }
             }
-            Phase::Finished { reason, .. } => {
-                label(&mut cmd, &art, wrap(reason, 28), 215., 196., 23., ink);
-                label(
-                    &mut cmd,
-                    &art,
-                    format!(
-                        "{} turns played\n{} pieces captured\n\nEscape returns to the lobby.\nUse a new name for a rematch.",
-                        v.ply,
-                        v.captured.len()
-                    ),
-                    215.,
-                    55.,
-                    17.,
-                    muted,
-                );
-            }
+            Phase::Playing => v
+                .messages
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "Select your piece, then a highlighted square.".into()),
+            Phase::Finished { reason, .. } => reason.clone(),
         }
-        label(&mut cmd, &art, wrap(&c.error, 43), 215., -330., 14., gold);
-        label(
-            &mut cmd,
-            &art,
-            "Your army is ivory. Enemy ranks remain hidden.",
-            -570.,
-            -395.,
-            16.,
-            ink,
-        );
-        label(
-            &mut cmd,
-            &art,
-            "Board and pieces from mas-plan.pdf",
-            -570.,
-            -424.,
-            13.,
-            muted,
-        );
-        button(
-            &mut cmd,
-            &art,
-            "F1  /  Field manual",
-            380.,
-            -375.,
-            330.,
-            false,
-        );
-        button(
-            &mut cmd,
-            &art,
-            "Resign  /  Escape to leave",
-            380.,
-            -420.,
-            330.,
-            false,
-        );
-    }
-    if c.help {
-        rect(
-            &mut cmd,
-            0.,
-            0.,
-            1190.,
-            730.,
-            10.,
-            Color::srgb(0.08, 0.11, 0.12),
-        );
-        // Overlay text must be above the panel.
-        let start=cmd.spawn((Painted,Text2d::new("FIELD MANUAL  /  F1 to close\n\nDeploy all 40 pieces in your four home rows. Auto-fill can help.\nYour opponent cannot see your ranks or your deployment.\n\nMove one square in any of eight directions. Attacks are orthogonal only.\nThe scout may travel any distance orthogonally, stopping at the first piece.\nYou cannot cross pieces or the two central flag gaps. Mines and flags stay put.\n\nStrength: Marshal > General > Captain > Cadet > Corporal > Rifleman\n             > Scout > Miner > Spy. Equal ranks remove both pieces.\nSpy defeats Marshal in either direction. Miner alone clears mines.\nEvery moving piece can capture the enemy flag to win.\n\nOnly the attacker learns the defender's rank. A surviving attacker's rank\nis never disclosed. Captured pieces are recorded by the server.\n\nSetup defaults to 2 minutes; moves default to 5 seconds.\nA missed move forfeits the turn; repeated misses lose the match.\nNo legal moves, or too many moves without a capture, means a draw.\nDisconnecting or resigning awards the opponent the match.\n\nSelect pieces with left click. Remove setup pieces with right click.\nF1 opens this manual. Escape leaves the match."),TextFont{font:art.font.clone(),font_size:20.,..default()},TextColor(ink),Anchor::CENTER_LEFT,Transform::from_xyz(-535.,0.,12.))).id();
-        let _ = start;
-    }
-}
-fn wrap(s: &str, width: usize) -> String {
-    let mut result = String::new();
-    let mut n = 0;
-    for word in s.split_whitespace() {
-        let len = word.chars().count();
-        if n > 0 && n + 1 + len > width {
-            result.push('\n');
-            n = 0;
-        }
-        if n > 0 {
-            result.push(' ');
-            n += 1;
-        }
-        result.push_str(word);
-        n += len;
-    }
-    result
+    };
+    label(
+        &mut cmd,
+        &art,
+        shortened(&status, ((layout.width - 120.) / 7.).max(8.) as usize),
+        -layout.width / 2. + 12.,
+        top - 11.,
+        13.,
+        ink,
+    );
+    label(
+        &mut cmd,
+        &art,
+        shortened(&detail, ((layout.width - 120.) / 6.).max(8.) as usize),
+        -layout.width / 2. + 12.,
+        top - 29.,
+        11.,
+        if c.error.is_empty() {
+            Color::srgb(0.76, 0.78, 0.72)
+        } else {
+            gold
+        },
+    );
+    label(
+        &mut cmd,
+        &art,
+        "YOUR TIME",
+        layout.width / 2. - 80.,
+        top - 9.,
+        8.,
+        ink,
+    );
+    cmd.spawn((
+        Painted,
+        Clock,
+        Text2d::new(""),
+        TextFont {
+            font: art.font.clone(),
+            font_size: 18.,
+            ..default()
+        },
+        TextColor(gold),
+        Anchor::CENTER_RIGHT,
+        Transform::from_xyz(layout.width / 2. - 12., top - 26., 8.),
+    ));
 }
 fn clock_text(c: Res<Client>, mut texts: Query<&mut Text2d, With<Clock>>) {
     if let Some(v) = &c.view {
-        let remain = v
+        let remaining = v
             .remaining_ms
             .saturating_sub(c.received.elapsed().as_millis() as u64);
+        let running = matches!(v.phase, Phase::Placement)
+            || matches!(v.phase, Phase::Playing) && v.turn == v.you;
         for mut text in &mut texts {
-            text.0 = if matches!(v.phase, Phase::Finished { .. }) {
-                "Match complete".into()
-            } else {
+            text.0 = if running {
                 format!(
-                    "{:02}:{:02}.{} remaining",
-                    remain / 60000,
-                    (remain / 1000) % 60,
-                    (remain / 100) % 10
+                    "{:02}:{:02}.{}",
+                    remaining / 60000,
+                    (remaining / 1000) % 60,
+                    (remaining / 100) % 10
                 )
+            } else {
+                "—".into()
             };
         }
     }
@@ -1062,5 +1114,276 @@ fn screenshot(
     }
     if *frame == 150 {
         exit.write(AppExit::Success);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn fixture() -> (Client, SyncSender<(u64, Event)>, Receiver<Action>) {
+        let (events_tx, events_rx) = mpsc::sync_channel(16);
+        let (actions_tx, actions_rx) = mpsc::sync_channel(16);
+        let client = Client {
+            address: String::new(),
+            room: "test".into(),
+            field: 1,
+            connecting: false,
+            tx: Some(actions_tx),
+            socket: None,
+            events: Mutex::new(events_rx),
+            sender: events_tx.clone(),
+            view: None,
+            received: Instant::now(),
+            error: String::new(),
+            selected: None,
+            rank: Rank::Flag,
+            dirty: true,
+            ready_sent: false,
+            preview: false,
+            session: 0,
+        };
+        (client, events_tx, actions_rx)
+    }
+    #[test]
+    fn completing_deployment_sends_ready_once_without_needing_a_ready_button() {
+        let cfg = Config::default();
+        let mut game = Game::new(0, &cfg);
+        game.start(0, &cfg);
+        game.apply(0, Action::AutoPlace, 0, &cfg).unwrap();
+        let (client, events_tx, actions_rx) = fixture();
+        let mut app = App::new();
+        app.insert_resource(client).add_systems(Update, receive);
+        for _ in 0..3 {
+            events_tx
+                .send((
+                    0,
+                    Event::Reply(Reply::State {
+                        view: game.view(0, "test", 0),
+                    }),
+                ))
+                .unwrap();
+            app.update();
+        }
+        assert_eq!(actions_rx.try_recv().unwrap(), Action::Ready);
+        assert!(actions_rx.try_recv().is_err());
+        game.apply(0, Action::Ready, 0, &cfg).unwrap();
+        events_tx
+            .send((
+                0,
+                Event::Reply(Reply::State {
+                    view: game.view(0, "test", 1),
+                }),
+            ))
+            .unwrap();
+        app.update();
+        assert!(actions_rx.try_recv().is_err());
+        assert!(
+            app.world()
+                .resource::<Client>()
+                .view
+                .as_ref()
+                .unwrap()
+                .ready[0]
+        );
+    }
+    #[test]
+    fn joining_and_leaving_fit_the_window_to_the_sheet_and_then_restore_login() {
+        let (mut client, _, _) = fixture();
+        client.view = Some(Game::new(0, &Config::default()).view(0, "test", 0));
+        let mut app = App::new();
+        app.insert_resource(client)
+            .init_resource::<Assets<Image>>()
+            .init_resource::<Surface>()
+            .add_systems(Update, fit_surface);
+        let window = app
+            .world_mut()
+            .spawn(Window {
+                resolution: (1280, 900).into(),
+                ..default()
+            })
+            .id();
+        app.update();
+        let size = app.world().get::<Window>(window).unwrap();
+        assert_eq!(
+            (size.width(), size.height()),
+            (plan::WIDTH as f32, plan::WINDOW_HEIGHT as f32)
+        );
+        assert!(size.resizable);
+        for factor in [1., 2.] {
+            let mut size = app.world_mut().get_mut::<Window>(window).unwrap();
+            size.resolution.set_scale_factor_override(Some(factor));
+            size.resolution.set(1100., 650.);
+            app.update();
+            app.update();
+            let size = app.world().get::<Window>(window).unwrap();
+            assert_eq!((size.width(), size.height()), (1100., 650.));
+            let layout = app.world().resource::<Surface>().layout;
+            assert!((layout.board_width / layout.board_height - plan::ASPECT).abs() < 0.00001);
+            assert_eq!((layout.width, layout.height), (1100., 650.));
+        }
+        app.world_mut().resource_mut::<Client>().leave();
+        app.update();
+        let size = app.world().get::<Window>(window).unwrap();
+        assert_eq!((size.width(), size.height()), (1280., 900.));
+        assert!(!size.resizable);
+    }
+    #[test]
+    fn every_game_phase_contains_the_full_plan_and_fixed_bar_at_any_window_size() {
+        let cfg = Config::default();
+        let mut game = Game::new(0, &cfg);
+        game.start(0, &cfg);
+        game.apply(0, Action::AutoPlace, 0, &cfg).unwrap();
+        game.apply(1, Action::AutoPlace, 0, &cfg).unwrap();
+        for (w, h) in [(600., 881.), (1200., 900.), (400., 1600.), (1600., 400.)] {
+            let layout = plan::Layout::new(w, h);
+            for you in 0..2 {
+                for phase in [
+                    Phase::Waiting,
+                    Phase::Placement,
+                    Phase::Playing,
+                    Phase::Finished {
+                        winner: Some(you),
+                        reason: "Flag captured".into(),
+                    },
+                ] {
+                    let (mut client, _, _) = fixture();
+                    game.phase = phase;
+                    game.turn = you;
+                    client.view = Some(game.view(you, "test", 0));
+                    let mut app = App::new();
+                    app.insert_resource(client)
+                        .insert_resource(Surface {
+                            layout,
+                            playing: Some(true),
+                        })
+                        .insert_resource(Art {
+                            font: default(),
+                            ranks: vec![Handle::default(); 11],
+                            board: default(),
+                            cover: default(),
+                        })
+                        .add_systems(Update, (paint, clock_text).chain());
+                    app.update();
+                    let mut sheets = 0;
+                    let mut bars = 0;
+                    let mut query = app.world_mut().query::<(&Sprite, &Transform)>();
+                    for (sprite, transform) in query.iter(app.world()) {
+                        let size = sprite.custom_size.unwrap();
+                        if size == Vec2::new(layout.board_width, layout.board_height) {
+                            sheets += 1;
+                        }
+                        if size == Vec2::new(layout.width, plan::BAR_HEIGHT as f32) {
+                            bars += 1;
+                        }
+                        assert!(
+                            transform.translation.x.abs() + size.x / 2. <= layout.width / 2. + 0.01
+                        );
+                        assert!(
+                            transform.translation.y.abs() + size.y / 2.
+                                <= layout.height / 2. + 0.01
+                        );
+                    }
+                    assert_eq!((sheets, bars), (1, 1));
+                    let mut clocks = app.world_mut().query_filtered::<&Transform, With<Clock>>();
+                    let clock = clocks.single(app.world()).unwrap();
+                    assert_eq!(clock.translation.x, layout.width / 2. - 12.);
+                    assert_eq!(clock.translation.y, layout.height / 2. - 26.);
+                    let count = app.world().entities().len();
+                    app.update();
+                    assert_eq!(app.world().entities().len(), count);
+                }
+            }
+        }
+    }
+    #[test]
+    fn resized_window_cursor_selects_bottom_cards_and_places_pieces_without_a_stale_camera() {
+        for you in 0..2 {
+            for dpi in [1., 2.] {
+                let cfg = Config::default();
+                let mut game = Game::new(0, &cfg);
+                game.start(0, &cfg);
+                let (mut client, _, actions) = fixture();
+                client.view = Some(game.view(you, "test", 0));
+                let mut app = App::new();
+                app.insert_resource(client)
+                    .init_resource::<Surface>()
+                    .init_resource::<Assets<Image>>()
+                    .init_resource::<ButtonInput<KeyCode>>()
+                    .init_resource::<ButtonInput<MouseButton>>()
+                    .add_message::<KeyboardInput>()
+                    .add_systems(Update, (fit_surface, input).chain());
+                let window = app.world_mut().spawn(Window::default()).id();
+                app.update();
+                for (w, h, target) in [
+                    (400., 1200., None),
+                    (1600., 500., Some(if you == 0 { 109 } else { 0 })),
+                ] {
+                    let layout = plan::Layout::new(w, h);
+                    let position = if let Some(at) = target {
+                        plan::cell(at).center()
+                    } else {
+                        plan::card(Rank::Miner, you).center()
+                    };
+                    let point = layout.world(position, you);
+                    let mut win = app.world_mut().get_mut::<Window>(window).unwrap();
+                    win.resolution.set_scale_factor_override(Some(dpi));
+                    win.resolution.set(w, h);
+                    win.set_cursor_position(Some(Vec2::new(point.x + w / 2., h / 2. - point.y)));
+                    app.insert_resource(ButtonInput::<MouseButton>::default());
+                    app.world_mut()
+                        .resource_mut::<ButtonInput<MouseButton>>()
+                        .press(MouseButton::Left);
+                    app.update();
+                    assert_eq!(app.world().resource::<Client>().rank, Rank::Miner);
+                    if let Some(at) = target {
+                        assert_eq!(
+                            actions.try_recv().unwrap(),
+                            Action::Place {
+                                at,
+                                rank: Rank::Miner
+                            }
+                        );
+                    } else {
+                        assert!(actions.try_recv().is_err());
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn time_bar_counts_only_setup_and_the_players_own_turn() {
+        let (mut client, _, _) = fixture();
+        let cfg = Config::default();
+        let mut game = Game::new(0, &cfg);
+        game.start(0, &cfg);
+        client.view = Some(game.view(0, "test", 0));
+        let mut app = App::new();
+        app.insert_resource(client).add_systems(Update, clock_text);
+        let clock = app.world_mut().spawn((Clock, Text2d::new(""))).id();
+        for (phase, turn, running) in [
+            (Phase::Placement, 0, true),
+            (Phase::Playing, 0, true),
+            (Phase::Playing, 1, false),
+            (Phase::Waiting, 0, false),
+            (
+                Phase::Finished {
+                    winner: None,
+                    reason: "Draw".into(),
+                },
+                0,
+                false,
+            ),
+        ] {
+            game.phase = phase;
+            game.turn = turn;
+            game.deadline = 5000;
+            app.world_mut().resource_mut::<Client>().view = Some(game.view(0, "test", 0));
+            app.update();
+            let text = &app.world().get::<Text2d>(clock).unwrap().0;
+            assert_eq!(text != "—", running);
+            if running {
+                assert!(text.starts_with("00:0"));
+            }
+        }
     }
 }
