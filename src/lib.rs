@@ -2,8 +2,10 @@
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
-pub const SIZE: usize = 10;
-pub const CELLS: usize = SIZE * SIZE;
+pub const COLS: usize = 10;
+pub const ROWS: usize = 11;
+pub const CELLS: usize = COLS * ROWS;
+pub const HOME_ROWS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -165,14 +167,14 @@ impl Config {
     }
 }
 pub fn blocked(at: usize) -> bool {
-    at < CELLS && matches!(at / 10, 4 | 5) && matches!(at % 10, 2 | 3 | 6 | 7)
+    at < CELLS && (4..=6).contains(&(at / COLS)) && matches!(at % COLS, 3 | 6)
 }
 pub fn home(owner: usize, at: usize) -> bool {
     at < CELLS
         && if owner == 0 {
-            at / 10 >= 6
+            at / COLS >= ROWS - HOME_ROWS
         } else {
-            at / 10 <= 3
+            at / COLS < HOME_ROWS
         }
 }
 
@@ -481,7 +483,7 @@ pub fn combat(a: Rank, b: Rank) -> i8 {
     }
 }
 pub fn square(at: usize) -> String {
-    format!("{}{}", (b'A' + (at % 10) as u8) as char, 10 - at / 10)
+    format!("{}{}", (b'A' + (at % COLS) as u8) as char, ROWS - at / COLS)
 }
 pub mod net;
 pub mod session;
@@ -496,8 +498,8 @@ pub fn legal_move(board: &[Option<Piece>], p: usize, from: usize, to: usize) -> 
     if a.owner != p || !a.rank.mobile() || board[to].is_some_and(|b| b.owner == p) {
         return false;
     }
-    let dx = (to % 10) as i32 - (from % 10) as i32;
-    let dy = (to / 10) as i32 - (from / 10) as i32;
+    let dx = (to % COLS) as i32 - (from % COLS) as i32;
+    let dy = (to / COLS) as i32 - (from / COLS) as i32;
     if board[to].is_some() && dx != 0 && dy != 0 {
         return false;
     }
@@ -507,7 +509,7 @@ pub fn legal_move(board: &[Option<Piece>], p: usize, from: usize, to: usize) -> 
     if a.rank != Rank::Scout || (dx != 0 && dy != 0) {
         return false;
     }
-    let step = dx.signum() + 10 * dy.signum();
+    let step = dx.signum() + COLS as i32 * dy.signum();
     let mut at = from as i32 + step;
     while at != to as i32 {
         if blocked(at as usize) || board[at as usize].is_some() {
@@ -537,4 +539,9 @@ impl View {
             .filter(|to| legal_move(&board, self.you, from, *to))
             .collect()
     }
+}
+
+/// Rotate the board for commander two. The transform is its own inverse.
+pub fn orient(at: usize, owner: usize) -> usize {
+    if owner == 0 { at } else { CELLS - 1 - at }
 }

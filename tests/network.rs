@@ -102,7 +102,7 @@ fn tcp_matchmaking_privacy_moves_timeouts_and_disconnects() {
     third.until(|v| matches!(v.phase, Phase::Waiting));
     // Guaranteed front-row mobile piece, then preserve it while filling the army.
     a.send(Action::Place {
-        at: 60,
+        at: 70,
         rank: Rank::Marshal,
     });
     a.send(Action::AutoPlace);
@@ -119,6 +119,7 @@ fn tcp_matchmaking_privacy_moves_timeouts_and_disconnects() {
     let av = a.until(|v| matches!(v.phase, Phase::Playing));
     let bv = b.until(|v| matches!(v.phase, Phase::Playing));
     for v in [&av, &bv] {
+        assert_eq!(v.board.len(), CELLS);
         assert_eq!(v.board.iter().flatten().count(), 80);
         assert!(
             v.board
@@ -129,7 +130,7 @@ fn tcp_matchmaking_privacy_moves_timeouts_and_disconnects() {
         );
     }
     if av.turn == 0 {
-        a.send(Action::Move { from: 60, to: 50 });
+        a.send(Action::Move { from: 70, to: 60 });
     } else {
         b.send(Action::Move { from: 30, to: 40 });
     }
@@ -165,6 +166,7 @@ fn tcp_matchmaking_privacy_moves_timeouts_and_disconnects() {
     c.join("setup clock");
     d.join("setup clock");
     let v = c.until(|v| matches!(v.phase, Phase::Playing));
+    assert_eq!(v.board.len(), CELLS);
     assert_eq!(v.board.iter().flatten().count(), 80);
     assert_eq!(v.ready, [true, true]);
 }

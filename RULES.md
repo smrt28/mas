@@ -1,6 +1,6 @@
 # Rules from the Czech PDF
 
-Source: `mas.pdf`, rules on pages 4–5; printed inventory/artwork on pages 7–10. Pages 1–3 introduce the game; page 6 describes assembling the physical box and folding pieces.
+Source: `mas.pdf`, rules on pages 4–5; printed inventory/artwork on pages 7–10. The complete plan and sharper piece artwork are supplied in `tmp/mas-plan.pdf`. Pages 1–3 of `mas.pdf` introduce the game; page 6 describes assembling the physical box and folding pieces.
 
 ## Army
 
@@ -34,9 +34,9 @@ The player whose flag is captured loses. The text also allows a draw when neithe
 
 ## Decisions for the digital edition
 
-The following make the incomplete physical scan into a fully specified timed network game:
+The board geometry follows the complete plan; the remaining decisions specify the timed network game:
 
-1. **Board geometry:** 10×10 with two blocked 2×2 areas: C5/D5/C6/D6 and G5/H5/G6/H6. The scans split and overlap the folded board; this geometry supports both 40-piece deployments and the two central obstacles described in the rules.
+1. **Board geometry:** 10 columns × 11 rows, exactly as shown in `tmp/mas-plan.pdf`. The two blocked 1×3 flag panels occupy D5/D6/D7 and G5/G6/G7. Each army deploys in its four back rows (ranks 1–4 or 8–11), leaving three neutral rows in the middle (ranks 5–7). The printed flags in the gaps are board decoration, not capturable pieces.
 2. **Diagonal corners:** a one-square diagonal move between blocked squares is allowed when its destination is free. Only a scout's multi-square orthogonal path is checked for intervening obstacles. No jumping is allowed.
 3. **First move:** the server randomly chooses the starting commander after deployment. There are no extra scout/spy abilities or dice.
 4. **Setup clock:** both players share a clock beginning when the second joins. Players can lock early; play begins immediately once both are ready. At expiry, unfilled squares receive a shuffled, exact remaining inventory, preserving existing placement.

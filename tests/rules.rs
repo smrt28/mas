@@ -43,7 +43,7 @@ fn setup_validates_zone_inventory_and_readiness() {
         g.apply(
             0,
             Action::Place {
-                at: 100,
+                at: CELLS,
                 rank: Rank::Marshal
             },
             0,
@@ -54,7 +54,7 @@ fn setup_validates_zone_inventory_and_readiness() {
     g.apply(
         0,
         Action::Place {
-            at: 99,
+            at: CELLS - 1,
             rank: Rank::Marshal,
         },
         0,
@@ -65,7 +65,7 @@ fn setup_validates_zone_inventory_and_readiness() {
         g.apply(
             0,
             Action::Place {
-                at: 98,
+                at: CELLS - 2,
                 rank: Rank::Marshal
             },
             0,
@@ -75,9 +75,12 @@ fn setup_validates_zone_inventory_and_readiness() {
     );
     assert!(g.apply(0, Action::Ready, 0, &cfg).is_err());
     g.apply(0, Action::AutoPlace, 0, &cfg).unwrap();
-    assert_eq!(g.board[99].unwrap().rank, Rank::Marshal);
+    assert_eq!(g.board[CELLS - 1].unwrap().rank, Rank::Marshal);
     g.apply(0, Action::Ready, 0, &cfg).unwrap();
-    assert!(g.apply(0, Action::Remove { at: 99 }, 0, &cfg).is_err());
+    assert!(
+        g.apply(0, Action::Remove { at: CELLS - 1 }, 0, &cfg)
+            .is_err()
+    );
     g.apply(1, Action::AutoPlace, 0, &cfg).unwrap();
     g.apply(1, Action::Ready, 0, &cfg).unwrap();
     assert_eq!(g.phase, Phase::Playing);
@@ -102,7 +105,7 @@ fn timeout_preserves_placement_and_fills_both_armies() {
     g.apply(
         0,
         Action::Place {
-            at: 99,
+            at: CELLS - 1,
             rank: Rank::Flag,
         },
         20,
@@ -113,7 +116,7 @@ fn timeout_preserves_placement_and_fills_both_armies() {
     assert!(g.tick(120010, &cfg));
     assert_eq!(g.phase, Phase::Playing);
     assert_eq!(g.board.iter().flatten().count(), 80);
-    assert_eq!(g.board[99].unwrap().rank, Rank::Flag);
+    assert_eq!(g.board[CELLS - 1].unwrap().rank, Rank::Flag);
 }
 #[test]
 fn setup_is_private_on_wire() {
@@ -155,7 +158,7 @@ fn diagonal_moves_but_never_diagonal_attacks() {
     assert!(!g.legal(1, 44, 45));
 }
 #[test]
-fn scouts_stop_at_pieces_and_lakes() {
+fn scouts_stop_at_pieces_and_flag_gaps() {
     let (mut g, _) = sparse();
     put(&mut g, 60, 0, Rank::Scout);
     assert!(g.legal(0, 60, 20));
@@ -165,8 +168,10 @@ fn scouts_stop_at_pieces_and_lakes() {
     assert!(!g.legal(0, 60, 20));
     put(&mut g, 61, 0, Rank::Spy);
     assert!(!g.legal(0, 60, 69));
-    put(&mut g, 62, 0, Rank::Scout);
-    assert!(!g.legal(0, 62, 22));
+    put(&mut g, 73, 0, Rank::Scout);
+    assert!(!g.legal(0, 73, 33));
+    put(&mut g, 76, 0, Rank::Scout);
+    assert!(!g.legal(0, 76, 36));
 }
 #[test]
 fn immobile_pieces_cannot_move_or_attack() {
@@ -267,7 +272,7 @@ fn invalid_moves_cannot_reset_clock() {
     let (mut g, cfg) = sparse();
     let before = g.deadline;
     assert!(
-        g.apply(0, Action::Move { from: 100, to: 0 }, 100, &cfg)
+        g.apply(0, Action::Move { from: CELLS, to: 0 }, 100, &cfg)
             .is_err()
     );
     assert_eq!(g.deadline, before);
@@ -344,4 +349,81 @@ fn config_rejects_zero_and_unbounded_clocks() {
     cfg.move_seconds = u64::MAX;
     assert!(cfg.validate().is_err());
     assert!(toml::from_str::<Config>("move_second = 1").is_err());
+}
+
+#[test]
+fn board_matches_plan_with_two_one_by_three_gaps() {
+    assert_eq!((COLS, ROWS, CELLS), (10, 11, 110));
+    assert_eq!(
+        (0..CELLS).filter(|at| blocked(*at)).collect::<Vec<_>>(),
+        vec![43, 46, 53, 56, 63, 66]
+    );
+    assert!(!blocked(CELLS));
+    assert_eq!((0..CELLS).filter(|at| !blocked(*at)).count(), 104);
+    assert_eq!(square(0), "A11");
+    assert_eq!(square(9), "J11");
+    assert_eq!(square(50), "A6");
+    assert_eq!(square(CELLS - 1), "J1");
+}
+#[test]
+fn deployment_has_four_rows_per_side_and_three_neutral_rows() {
+    for at in 0..CELLS {
+        assert_eq!(home(0, at), at >= 70);
+        assert_eq!(home(1, at), at < 40);
+        if (40..70).contains(&at) {
+            assert!(!home(0, at) && !home(1, at));
+        }
+    }
+    assert_eq!((0..CELLS).filter(|at| home(0, *at)).count(), 40);
+    assert_eq!((0..CELLS).filter(|at| home(1, *at)).count(), 40);
+    assert!(!home(0, CELLS));
+}
+#[test]
+fn both_perspectives_rotate_all_eleven_rows_and_preserve_gaps() {
+    assert_eq!(orient(0, 1), 109);
+    assert_eq!(orient(9, 1), 100);
+    assert_eq!(orient(100, 1), 9);
+    for at in 0..CELLS {
+        assert_eq!(orient(at, 0), at);
+        assert_eq!(orient(orient(at, 1), 1), at);
+        assert_eq!(blocked(orient(at, 1)), blocked(at));
+        assert_eq!(home(0, orient(at, 1)), home(1, at));
+    }
+}
+#[test]
+fn gaps_block_destinations_and_scout_paths_but_adjacent_corridors_are_open() {
+    let mut board = vec![None; CELLS];
+    for (origin, gap, across) in [(33, 43, 73), (36, 46, 76), (73, 63, 33), (76, 66, 36)] {
+        board.fill(None);
+        board[origin] = Some(Piece {
+            owner: 0,
+            rank: Rank::Scout,
+        });
+        assert!(!legal_move(&board, 0, origin, gap));
+        assert!(!legal_move(&board, 0, origin, across));
+    }
+    for col in [0, 1, 2, 4, 5, 7, 8, 9] {
+        let origin = 30 + col;
+        board.fill(None);
+        board[origin] = Some(Piece {
+            owner: 0,
+            rank: Rank::Scout,
+        });
+        assert!(legal_move(&board, 0, origin, 70 + col));
+    }
+}
+#[test]
+fn new_bottom_row_moves_attacks_and_bounds_work() {
+    let (mut g, cfg) = sparse();
+    put(&mut g, 109, 0, Rank::Captain);
+    assert!(g.legal(0, 109, 108));
+    assert!(g.legal(0, 109, 99));
+    assert!(g.legal(0, 109, 98));
+    assert!(!g.legal(0, 109, 100));
+    assert!(!g.legal(0, 109, 110));
+    put(&mut g, 108, 1, Rank::Spy);
+    g.apply(0, Action::Move { from: 109, to: 108 }, 1, &cfg)
+        .unwrap();
+    assert_eq!(g.board[108].unwrap().rank, Rank::Captain);
+    assert!(g.board[109].is_none());
 }

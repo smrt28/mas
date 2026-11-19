@@ -128,7 +128,7 @@ fn complete_matches_with_serialized_commands_and_private_views() {
             }
             let id = v.turn as u64;
             let active = s.view(id, now).unwrap();
-            let moves: Vec<_> = (0..100)
+            let moves: Vec<_> = (0..CELLS)
                 .flat_map(|from| {
                     active
                         .legal_targets(from)
@@ -147,6 +147,7 @@ fn complete_matches_with_serialized_commands_and_private_views() {
                 .unwrap();
             for player in 0..2 {
                 let view = s.view(player, now).unwrap();
+                assert_eq!(view.board.len(), CELLS);
                 assert_eq!(
                     view.board.iter().flatten().count() + view.captured.len(),
                     80
@@ -184,9 +185,9 @@ fn client_legal_targets_match_authoritative_rules() {
     g.start(0, &cfg);
     g.tick(120000, &cfg);
     let view = g.view(g.turn, "test", 120000);
-    for from in 0..100 {
+    for from in 0..CELLS {
         let targets = view.legal_targets(from);
-        for to in 0..100 {
+        for to in 0..CELLS {
             assert_eq!(targets.contains(&to), g.legal(g.turn, from, to));
         }
     }

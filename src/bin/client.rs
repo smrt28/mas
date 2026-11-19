@@ -15,7 +15,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-const CELL: f32 = 62.;
+const CELL: f32 = 60.;
+const BOARD_WIDTH: f32 = COLS as f32 * CELL;
+const BOARD_HEIGHT: f32 = ROWS as f32 * CELL;
 const LEFT: f32 = -570.;
 const TOP: f32 = 290.;
 #[derive(Component)]
@@ -28,7 +30,7 @@ struct Offscreen(Handle<Image>);
 struct Art {
     font: Handle<Font>,
     ranks: Vec<Handle<Image>>,
-    terrain: Handle<Image>,
+    board: Handle<Image>,
     cover: Handle<Image>,
 }
 enum Event {
@@ -272,7 +274,7 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, mut images: ResMut<As
             .into_iter()
             .map(|r| assets.load(format!("{}.png", r.asset())))
             .collect(),
-        terrain: assets.load("terrain.png"),
+        board: assets.load("board.png"),
         cover: assets.load("cover.png"),
     });
 }
@@ -428,11 +430,11 @@ fn input(
     }
     let col = ((pos.x - LEFT) / CELL).floor() as i32;
     let row = ((TOP + CELL / 2. - pos.y) / CELL).floor() as i32;
-    if !(0..10).contains(&col) || !(0..10).contains(&row) {
+    if !(0..COLS as i32).contains(&col) || !(0..ROWS as i32).contains(&row) {
         return;
     }
-    let screen = row as usize * 10 + col as usize;
-    let at = if v.you == 0 { screen } else { 99 - screen };
+    let screen = row as usize * COLS + col as usize;
+    let at = orient(screen, v.you);
     if matches!(v.phase, Phase::Placement) {
         if right {
             c.send(Action::Remove { at });
@@ -642,38 +644,34 @@ fn paint(
             17.,
             gold,
         );
-        picture(
-            &mut cmd,
-            art.terrain.clone(),
-            LEFT + 310.,
-            TOP - 279.,
-            620.,
-            620.,
+        let mut board_transform = Transform::from_xyz(
+            LEFT + BOARD_WIDTH / 2.,
+            TOP + CELL / 2. - BOARD_HEIGHT / 2.,
             0.,
         );
+        if v.you == 1 {
+            board_transform.rotation = Quat::from_rotation_z(std::f32::consts::PI);
+        }
+        cmd.spawn((
+            Painted,
+            Sprite {
+                image: art.board.clone(),
+                custom_size: Some(Vec2::new(BOARD_WIDTH, BOARD_HEIGHT)),
+                ..default()
+            },
+            board_transform,
+        ));
         let targets = c
             .selected
             .map(|from| v.legal_targets(from))
             .unwrap_or_default();
-        for screen in 0..100 {
-            let at = if v.you == 0 { screen } else { 99 - screen };
-            let x = LEFT + (screen % 10) as f32 * CELL + CELL / 2.;
-            let y = TOP - (screen / 10) as f32 * CELL;
-            rect(
-                &mut cmd,
-                x,
-                y,
-                60.,
-                60.,
-                1.,
-                if blocked(at) {
-                    Color::srgb(0.12, 0.23, 0.26)
-                } else {
-                    Color::srgba(0.71, 0.62, 0.43, 0.30)
-                },
-            );
+        for screen in 0..CELLS {
+            let at = orient(screen, v.you);
+            let x = LEFT + (screen % COLS) as f32 * CELL + CELL / 2.;
+            let y = TOP - (screen / COLS) as f32 * CELL;
+            // The printed flag panels span three rows each. Leave their art
+            // uninterrupted; neither cells nor piece hit targets can enter them.
             if blocked(at) {
-                label(&mut cmd, &art, "≈", x - 13., y, 29., muted);
                 continue;
             }
             if targets.contains(&at) {
@@ -694,13 +692,23 @@ fn paint(
                 let friendly = p.owner == v.you;
                 rect(
                     &mut cmd,
+                    x + 2.,
+                    y - 2.,
+                    50.,
+                    54.,
+                    2.5,
+                    Color::srgba(0.10, 0.07, 0.04, 0.45),
+                );
+                rect(&mut cmd, x, y, 50., 54., 3., Color::srgb(0.52, 0.37, 0.19));
+                rect(
+                    &mut cmd,
                     x,
                     y,
-                    49.,
-                    53.,
-                    3.,
+                    47.,
+                    51.,
+                    3.5,
                     if friendly {
-                        Color::srgb(0.90, 0.85, 0.70)
+                        Color::srgb(0.96, 0.92, 0.81)
                     } else {
                         Color::srgb(0.65, 0.24, 0.18)
                     },
@@ -711,8 +719,8 @@ fn paint(
                         art.ranks[rank as usize].clone(),
                         x,
                         y + 4.,
-                        34.,
-                        34.,
+                        40.,
+                        38.,
                         4.,
                     );
                     label(
@@ -729,23 +737,26 @@ fn paint(
                 }
             }
         }
-        for i in 0..10 {
-            let at = if v.you == 0 { i } else { 9 - i };
+        for col in 0..COLS {
+            let at = orient(col, v.you);
             label(
                 &mut cmd,
                 &art,
-                ((b'A' + at as u8) as char).to_string(),
-                LEFT + i as f32 * CELL + 25.,
-                -320.,
+                ((b'A' + (at % COLS) as u8) as char).to_string(),
+                LEFT + col as f32 * CELL + CELL / 2. - 5.,
+                TOP + CELL / 2. - BOARD_HEIGHT - 17.,
                 12.,
                 muted,
             );
+        }
+        for row in 0..ROWS {
+            let at = orient(row * COLS, v.you);
             label(
                 &mut cmd,
                 &art,
-                if v.you == 0 { 10 - i } else { i + 1 }.to_string(),
-                -598.,
-                TOP - i as f32 * CELL,
+                (ROWS - at / COLS).to_string(),
+                LEFT - 28.,
+                TOP - row as f32 * CELL,
                 12.,
                 muted,
             );
@@ -920,16 +931,16 @@ fn paint(
             &art,
             "Your army is ivory. Enemy ranks remain hidden.",
             -570.,
-            -365.,
+            -395.,
             16.,
             ink,
         );
         label(
             &mut cmd,
             &art,
-            "Original artwork extracted from mas.pdf",
+            "Board and pieces from mas-plan.pdf",
             -570.,
-            -399.,
+            -424.,
             13.,
             muted,
         );
@@ -963,7 +974,7 @@ fn paint(
             Color::srgb(0.08, 0.11, 0.12),
         );
         // Overlay text must be above the panel.
-        let start=cmd.spawn((Painted,Text2d::new("FIELD MANUAL  /  F1 to close\n\nDeploy all 40 pieces in your four home rows. Auto-fill can help.\nYour opponent cannot see your ranks or your deployment.\n\nMove one square in any of eight directions. Attacks are orthogonal only.\nThe scout may travel any distance orthogonally, stopping at the first piece.\nYou cannot cross pieces or the two central lakes. Mines and flags stay put.\n\nStrength: Marshal > General > Captain > Cadet > Corporal > Rifleman\n             > Scout > Miner > Spy. Equal ranks remove both pieces.\nSpy defeats Marshal in either direction. Miner alone clears mines.\nEvery moving piece can capture the enemy flag to win.\n\nOnly the attacker learns the defender's rank. A surviving attacker's rank\nis never disclosed. Captured pieces are recorded by the server.\n\nSetup defaults to 2 minutes; moves default to 5 seconds.\nA missed move forfeits the turn; repeated misses lose the match.\nNo legal moves, or too many moves without a capture, means a draw.\nDisconnecting or resigning awards the opponent the match.\n\nSelect pieces with left click. Remove setup pieces with right click.\nF1 opens this manual. Escape leaves the match."),TextFont{font:art.font.clone(),font_size:20.,..default()},TextColor(ink),Anchor::CENTER_LEFT,Transform::from_xyz(-535.,0.,12.))).id();
+        let start=cmd.spawn((Painted,Text2d::new("FIELD MANUAL  /  F1 to close\n\nDeploy all 40 pieces in your four home rows. Auto-fill can help.\nYour opponent cannot see your ranks or your deployment.\n\nMove one square in any of eight directions. Attacks are orthogonal only.\nThe scout may travel any distance orthogonally, stopping at the first piece.\nYou cannot cross pieces or the two central flag gaps. Mines and flags stay put.\n\nStrength: Marshal > General > Captain > Cadet > Corporal > Rifleman\n             > Scout > Miner > Spy. Equal ranks remove both pieces.\nSpy defeats Marshal in either direction. Miner alone clears mines.\nEvery moving piece can capture the enemy flag to win.\n\nOnly the attacker learns the defender's rank. A surviving attacker's rank\nis never disclosed. Captured pieces are recorded by the server.\n\nSetup defaults to 2 minutes; moves default to 5 seconds.\nA missed move forfeits the turn; repeated misses lose the match.\nNo legal moves, or too many moves without a capture, means a draw.\nDisconnecting or resigning awards the opponent the match.\n\nSelect pieces with left click. Remove setup pieces with right click.\nF1 opens this manual. Escape leaves the match."),TextFont{font:art.font.clone(),font_size:20.,..default()},TextColor(ink),Anchor::CENTER_LEFT,Transform::from_xyz(-535.,0.,12.))).id();
         let _ = start;
     }
 }
