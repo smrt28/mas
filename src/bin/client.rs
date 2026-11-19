@@ -15,16 +15,52 @@ use std::{
     time::{Duration, Instant},
 };
 
-const LOGIN_X: f32 = 385.;
-const LOGIN_WIDTH: f32 = 350.;
-const LOGIN_FIELD_HEIGHT: f32 = 36.;
-const LOGIN_SERVER_Y: f32 = -258.;
-const LOGIN_GAME_Y: f32 = -302.;
-const LOGIN_ENTER_Y: f32 = -346.;
+struct LoginLayout {
+    x: f32,
+    game_y: f32,
+    server_y: f32,
+    enter_y: f32,
+    width: f32,
+    scale: f32,
+}
+fn login_layout(surface: plan::Layout) -> LoginLayout {
+    let scale = ((surface.width - 32.) / 382.).clamp(0.1, 1.);
+    let margin = 64_f32.min((surface.width - 382. * scale) / 2.);
+    let x = surface.width / 2. - margin - 191. * scale;
+    let game_y = -surface.height / 2. + 66. + 82. * scale;
+    LoginLayout {
+        x,
+        game_y,
+        server_y: game_y + 44. * scale,
+        enter_y: game_y - 44. * scale,
+        width: 350. * scale,
+        scale,
+    }
+}
+fn client_window(preview: bool) -> Window {
+    Window {
+        title: "Maršál a špión | Field command".into(),
+        resolution: if preview {
+            (plan::WIDTH, plan::WINDOW_HEIGHT).into()
+        } else {
+            (1280, 900).into()
+        },
+        // Enable mouse resizing at creation and keep it enabled on every screen.
+        resizable: true,
+        resize_constraints: WindowResizeConstraints {
+            min_width: 360.,
+            min_height: 480.,
+            ..default()
+        },
+        ..default()
+    }
+}
 #[derive(Component)]
 struct Painted;
 #[derive(Component)]
 struct Clock;
+#[derive(Component)]
+struct ReserveCount;
 #[derive(Resource, Default)]
 struct Surface {
     layout: plan::Layout,
@@ -250,21 +286,7 @@ fn main() {
         ));
     } else {
         app.add_plugins(plugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Maršál a špión | Field command".into(),
-                resolution: if preview {
-                    (plan::WIDTH, plan::WINDOW_HEIGHT).into()
-                } else {
-                    (1280, 900).into()
-                },
-                resizable: preview,
-                resize_constraints: WindowResizeConstraints {
-                    min_width: 360.,
-                    min_height: 480.,
-                    ..default()
-                },
-                ..default()
-            }),
+            primary_window: Some(client_window(preview)),
             ..default()
         }));
     }
@@ -333,7 +355,6 @@ fn fit_surface(
             window
                 .resolution
                 .set(initial_size.0 as f32, initial_size.1 as f32);
-            window.resizable = playing;
         }
         if let Some(target) = &offscreen
             && let Some(image) = images.get_mut(&target.0)
@@ -483,22 +504,17 @@ fn input(
     let clicked = mouse.just_pressed(MouseButton::Left);
     let right = mouse.just_pressed(MouseButton::Right);
     if c.view.is_none() {
+        let login = login_layout(surface.layout);
         if clicked {
-            if hit(
-                pos,
-                LOGIN_X,
-                LOGIN_SERVER_Y,
-                LOGIN_WIDTH,
-                LOGIN_FIELD_HEIGHT,
-            ) {
+            if hit(pos, login.x, login.server_y, login.width, 36. * login.scale) {
                 c.field = 0;
                 c.dirty = true;
             }
-            if hit(pos, LOGIN_X, LOGIN_GAME_Y, LOGIN_WIDTH, LOGIN_FIELD_HEIGHT) {
+            if hit(pos, login.x, login.game_y, login.width, 36. * login.scale) {
                 c.field = 1;
                 c.dirty = true;
             }
-            if hit(pos, LOGIN_X, LOGIN_ENTER_Y, LOGIN_WIDTH, 34.) && !c.connecting {
+            if hit(pos, login.x, login.enter_y, login.width, 34. * login.scale) && !c.connecting {
                 c.connect();
             }
         }
@@ -619,30 +635,6 @@ fn label(
         Transform::from_xyz(x, y, 8.),
     ));
 }
-fn button(cmd: &mut Commands, art: &Art, s: &str, x: f32, y: f32, w: f32, active: bool) {
-    rect(
-        cmd,
-        x,
-        y,
-        w,
-        34.,
-        5.,
-        if active {
-            Color::srgb(0.6, 0.27, 0.18)
-        } else {
-            Color::srgb(0.16, 0.20, 0.22)
-        },
-    );
-    label(
-        cmd,
-        art,
-        s,
-        x - w / 2. + 12.,
-        y,
-        15.,
-        Color::srgb(0.96, 0.90, 0.75),
-    );
-}
 fn border(cmd: &mut Commands, x: f32, y: f32, w: f32, h: f32, z: f32, color: Color) {
     let stroke = w.min(h) / 25.;
     for (dx, dy, width, height) in [
@@ -699,37 +691,41 @@ fn paint(
     let ink = Color::srgb(0.94, 0.88, 0.74);
     let gold = Color::srgb(0.94, 0.67, 0.32);
     let Some(v) = &c.view else {
+        let login = login_layout(surface.layout);
+        let scale = login.scale;
+        let cover_width =
+            (surface.layout.width - 90.).min((surface.layout.height - 90.) * 1532. / 1027.);
         picture(
             &mut cmd,
             art.cover.clone(),
             0.,
             0.,
-            1190.,
-            1190. * 1027. / 1532.,
+            cover_width,
+            cover_width * 1027. / 1532.,
             0.,
         );
         rect(
             &mut cmd,
-            LOGIN_X,
-            LOGIN_GAME_Y,
-            LOGIN_WIDTH + 32.,
-            164.,
+            login.x,
+            login.game_y,
+            382. * scale,
+            164. * scale,
             1.,
             Color::srgba(0.035, 0.05, 0.055, 0.90),
         );
         for (i, (name, value, y)) in [
-            ("Server:", c.address.as_str(), LOGIN_SERVER_Y),
-            ("Game:", c.room.as_str(), LOGIN_GAME_Y),
+            ("Server:", c.address.as_str(), login.server_y),
+            ("Game:", c.room.as_str(), login.game_y),
         ]
         .into_iter()
         .enumerate()
         {
             rect(
                 &mut cmd,
-                LOGIN_X,
+                login.x,
                 y,
-                LOGIN_WIDTH,
-                LOGIN_FIELD_HEIGHT,
+                login.width,
+                36. * scale,
                 3.,
                 if c.field == i {
                     Color::srgb(0.24, 0.29, 0.29)
@@ -741,9 +737,9 @@ fn paint(
                 &mut cmd,
                 &art,
                 name,
-                LOGIN_X - LOGIN_WIDTH / 2. + 12.,
+                login.x - login.width / 2. + 12. * scale,
                 y,
-                16.,
+                16. * scale,
                 ink,
             );
             let tail: String = value
@@ -763,29 +759,38 @@ fn paint(
                 &mut cmd,
                 &art,
                 display,
-                LOGIN_X - LOGIN_WIDTH / 2. + 80.,
+                login.x - login.width / 2. + 80. * scale,
                 y,
-                16.,
+                16. * scale,
                 ink,
             );
         }
-        button(
+        rect(
+            &mut cmd,
+            login.x,
+            login.enter_y,
+            login.width,
+            34. * scale,
+            5.,
+            Color::srgb(0.6, 0.27, 0.18),
+        );
+        label(
             &mut cmd,
             &art,
             "Enter",
-            LOGIN_X,
-            LOGIN_ENTER_Y,
-            LOGIN_WIDTH,
-            true,
+            login.x - login.width / 2. + 12. * scale,
+            login.enter_y,
+            15. * scale,
+            ink,
         );
         if !c.error.is_empty() {
             label(
                 &mut cmd,
                 &art,
                 shortened(&c.error, 44),
-                LOGIN_X - LOGIN_WIDTH / 2.,
-                -414.,
-                13.,
+                login.x - login.width / 2.,
+                login.game_y - 112. * scale,
+                13. * scale,
                 gold,
             );
         }
@@ -898,62 +903,44 @@ fn paint(
             }
         }
     }
-    if matches!(v.phase, Phase::Placement) {
-        for (rank, count) in &v.reserve {
-            let card = plan::card(*rank, v.you);
-            if *count == 0 {
-                printed_rect(
-                    &mut cmd,
-                    card,
-                    v.you,
-                    1.,
-                    Color::srgba(0.04, 0.03, 0.02, 0.4),
-                    false,
-                    layout,
-                );
-            }
-            if *rank == c.rank && *count > 0 && !v.ready[v.you] {
-                printed_rect(&mut cmd, card, v.you, 2., gold, true, layout);
-            }
-            if *count != rank.count() {
-                // Replace only the printed inventory number, in the same place.
-                let source_count = if v.you == 0 {
-                    plan::Point {
-                        x: card.center().x,
-                        y: 1960.,
-                    }
-                } else {
-                    plan::Point {
-                        x: card.center().x,
-                        y: 48.,
-                    }
-                };
-                let point = layout.world(source_count, v.you);
-                let paper = if v.you == 0 {
-                    Color::srgb(0.87, 0.36, 0.28)
-                } else {
-                    Color::srgb(0.96, 0.94, 0.87)
-                };
-                rect(
-                    &mut cmd,
-                    point.x,
-                    point.y,
-                    27. * scale,
-                    17. * scale,
-                    3.,
-                    paper,
-                );
-                label(
-                    &mut cmd,
-                    &art,
-                    format!("{count}×"),
-                    point.x - 10. * scale,
-                    point.y,
-                    12. * scale,
-                    Color::BLACK,
-                );
-            }
+    for (rank, count) in &v.reserve {
+        let card = plan::card(*rank, v.you);
+        let deploying = matches!(v.phase, Phase::Placement);
+        if deploying && *count == 0 {
+            printed_rect(
+                &mut cmd,
+                card,
+                v.you,
+                1.,
+                Color::srgba(0.04, 0.03, 0.02, 0.4),
+                false,
+                layout,
+            );
         }
+        if deploying && *rank == c.rank && *count > 0 && !v.ready[v.you] {
+            printed_rect(&mut cmd, card, v.you, 2., gold, true, layout);
+        }
+        // Both printed strips have clean, blank count areas. Draw every live
+        // reserve value from the server, including the initial inventory, without
+        // painting a flat patch over the restored paper beneath it.
+        let count_position = plan::Point {
+            x: card.center().x,
+            y: if v.you == 0 { 1960. } else { 48. },
+        };
+        let point = layout.world(count_position, v.you);
+        cmd.spawn((
+            Painted,
+            ReserveCount,
+            Text2d::new(format!("{count}×")),
+            TextFont {
+                font: art.font.clone(),
+                font_size: 12. * scale,
+                ..default()
+            },
+            TextColor(Color::BLACK),
+            Anchor::CENTER,
+            Transform::from_xyz(point.x, point.y, 8.),
+        ));
     }
     // This is the only UI outside the original plan.
     let top = layout.height / 2.;
@@ -1188,20 +1175,26 @@ mod tests {
     }
     #[test]
     fn joining_and_leaving_fit_the_window_to_the_sheet_and_then_restore_login() {
-        let (mut client, _, _) = fixture();
-        client.view = Some(Game::new(0, &Config::default()).view(0, "test", 0));
+        let (client, _, _) = fixture();
         let mut app = App::new();
         app.insert_resource(client)
             .init_resource::<Assets<Image>>()
             .init_resource::<Surface>()
             .add_systems(Update, fit_surface);
-        let window = app
-            .world_mut()
-            .spawn(Window {
-                resolution: (1280, 900).into(),
-                ..default()
-            })
-            .id();
+        let window = app.world_mut().spawn(client_window(false)).id();
+        assert!(app.world().get::<Window>(window).unwrap().resizable);
+        app.update();
+        app.world_mut()
+            .get_mut::<Window>(window)
+            .unwrap()
+            .resolution
+            .set(1000., 700.);
+        app.update();
+        let login = app.world().get::<Window>(window).unwrap();
+        assert!(login.resizable);
+        assert_eq!((login.width(), login.height()), (1000., 700.));
+        app.world_mut().resource_mut::<Client>().view =
+            Some(Game::new(0, &Config::default()).view(0, "test", 0));
         app.update();
         let size = app.world().get::<Window>(window).unwrap();
         assert_eq!(
@@ -1225,7 +1218,7 @@ mod tests {
         app.update();
         let size = app.world().get::<Window>(window).unwrap();
         assert_eq!((size.width(), size.height()), (1280., 900.));
-        assert!(!size.resizable);
+        assert!(size.resizable);
     }
     #[test]
     fn every_game_phase_contains_the_full_plan_and_fixed_bar_at_any_window_size() {
@@ -1346,6 +1339,75 @@ mod tests {
                     } else {
                         assert!(actions.try_recv().is_err());
                     }
+                }
+            }
+        }
+    }
+    #[test]
+    fn cleaned_cards_show_initial_placed_and_returned_counts_on_both_sides() {
+        for you in 0..2 {
+            let cfg = Config::default();
+            let mut game = Game::new(0, &cfg);
+            game.start(0, &cfg);
+            let (mut client, _, _) = fixture();
+            client.view = Some(game.view(you, "test", 0));
+            let mut app = App::new();
+            app.insert_resource(client)
+                .init_resource::<Surface>()
+                .insert_resource(Art {
+                    font: default(),
+                    ranks: vec![Handle::default(); 11],
+                    board: default(),
+                    cover: default(),
+                })
+                .add_systems(Update, paint);
+            let at = if you == 0 { 109 } else { 0 };
+            for expected_flag_count in [1, 0, 1] {
+                if expected_flag_count == 0 {
+                    game.apply(
+                        you,
+                        Action::Place {
+                            at,
+                            rank: Rank::Flag,
+                        },
+                        0,
+                        &cfg,
+                    )
+                    .unwrap();
+                } else if game.board[at].is_some() {
+                    game.apply(you, Action::Remove { at }, 0, &cfg).unwrap();
+                }
+                let mut client = app.world_mut().resource_mut::<Client>();
+                client.view = Some(game.view(you, "test", 0));
+                client.dirty = true;
+                app.update();
+                let mut query = app
+                    .world_mut()
+                    .query_filtered::<(&Text2d, &Transform, &TextColor), With<ReserveCount>>();
+                let counts: Vec<_> = query.iter(app.world()).collect();
+                assert_eq!(counts.len(), 11);
+                for rank in plan::STRIP {
+                    let p = plan::Layout::default().world(
+                        plan::Point {
+                            x: plan::card(rank, you).center().x,
+                            y: if you == 0 { 1960. } else { 48. },
+                        },
+                        you,
+                    );
+                    let (text, _, color) = counts
+                        .iter()
+                        .find(|(_, transform, _)| {
+                            (transform.translation.x - p.x).abs() < 0.01
+                                && (transform.translation.y - p.y).abs() < 0.01
+                        })
+                        .unwrap();
+                    let expected = if rank == Rank::Flag {
+                        expected_flag_count
+                    } else {
+                        rank.count()
+                    };
+                    assert_eq!(text.0, format!("{expected}×"));
+                    assert_eq!(color.0, Color::BLACK);
                 }
             }
         }

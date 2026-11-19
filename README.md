@@ -1,6 +1,6 @@
 # Maršál a špión
 
-A two-player hidden-army board game in Rust, with a native **Bevy 0.18** client and an authoritative TCP server. Rules and original scanned graphics come from [`mas.pdf`](mas.pdf), especially pages 4–5. The complete 10×11 board and original piece references come from [`tmp/mas-plan.pdf`](tmp/mas-plan.pdf). No database, accounts, save files, or persistent matches: restarting the server removes everything.
+A two-player hidden-army board game in Rust, with a native **Bevy 0.18** client and an authoritative TCP server. Rules and original scanned graphics come from [`mas.pdf`](mas.pdf), especially pages 4–5. The complete 10×11 board and original piece references come from [`tmp/mas-plan.pdf`](tmp/mas-plan.pdf). The game uses a cleaned restoration with blank count areas; a [restored PDF copy](tmp/mas-plan-restored.pdf) preserves the original page size. See [restoration details and prompt](assets/board-restoration.md). No database, accounts, save files, or persistent matches: restarting the server removes everything.
 
 ## Run
 
@@ -55,7 +55,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-The 43 rules/session/plan tests include randomized matches, private JSON views, server clocks, inventory conservation, combat exceptions, room isolation and cleanup, exact printed-cell and card picking in both orientations, and a complete deployment/move through those coordinates. Five client tests verify automatic Ready, join/leave window sizing, per-player clocks, preserved user resizing, clicks immediately after wide/tall and high-DPI resizes, and that every game phase fits inside the full sheet and fixed-height bar. Geometry checks cover the PDF aspect ratio, uniform scaling, rotated card/cell picking at several sizes, and ignored clicks in the margins. These tests do not need a GPU, display, or sockets.
+The 43 rules/session/plan tests include randomized matches, private JSON views, server clocks, inventory conservation, combat exceptions, room isolation and cleanup, exact printed-cell and card picking in both orientations, and a complete deployment/move through those coordinates. Six client tests verify automatic Ready, join/leave window sizing, per-player clocks, initial/placed/returned reserve counts, preserved user resizing, clicks immediately after wide/tall and high-DPI resizes, and that every game phase fits inside the full sheet and fixed-height bar. Geometry checks cover the PDF aspect ratio, uniform scaling, rotated card/cell picking at several sizes, and ignored clicks in the margins. These tests do not need a GPU, display, or sockets.
 
 The live TCP integration test starts the actual server and connects several clients. It checks matchmaking, third-player rejection, private deployment, moves, automatic setup, timeout loss, and disconnect wins:
 
@@ -85,7 +85,9 @@ cargo run --bin mas-client -- --headless --preview --screenshot /tmp/mas-preview
 - `src/bin/server.rs`: single game-state owner with bounded I/O queues, per-connection readers/writers, monotonic clocks, limits and disconnect cleanup.
 - `src/bin/client.rs`: Bevy 2D interface, game-name entry, deployment, board interaction, clocks and field reports. Network work runs off the render thread.
 - `assets/`: the complete printed PDF sheet in `board.png` (including both piece strips), solid-black transparent piece PNGs with traced SVG masters in `assets/vectors/`, cover artwork and a bundled DejaVu font with its license. Bevy loads this directory relative to the compiled source location; retain it when running the binaries.
-- `tools/extract_assets.py`: extracts the board and exports piece PNGs from the committed SVG masters. It preserves the upright, AI-restored cover, with an upright raw-PDF fallback if that asset is missing. See [cover restoration and prompts](assets/cover-restoration.md). Requires Poppler (`pdftoppm`), librsvg (`rsvg-convert`), and Python Pillow.
+- `tools/extract_assets.py`: preserves the restored board (recovering its exact pixels from the restored PDF if missing) and exports piece PNGs from the committed SVG masters. It preserves the upright, AI-restored cover, with an upright raw-PDF fallback if that asset is missing. See [cover restoration and prompts](assets/cover-restoration.md). Requires Poppler (`pdftoppm`), librsvg (`rsvg-convert`), and Python Pillow.
+- `tools/export_board_pdf.py`: exports the cleaned board losslessly at the original PDF page size.
+- `tools/check_board_alignment.py`: verifies grid registration against the original PDF; the report is in `assets/board-alignment.json`.
 - `tools/trace_pieces.py`: reproduces the SVG traces from the PDF's original embedded scan, using Potrace, Poppler (`pdfimages`), librsvg, and Pillow. The corporal uses the intact red-side reference. See [`assets/vectors/README.md`](assets/vectors/README.md).
 
 The wire protocol is one JSON object per newline: actions use a `type` field (`join`, `place`, `remove`, `auto_place`, `ready`, `move`, `resign`); replies are `state` or `error`. Coordinates are indices `0..109`, with index `y * 10 + x` on the 10-column, 11-row board; A11 is index 0 and J1 is index 109. The six blocked squares are D5–D7 and G5–G7; each commander deploys in their four back rows, leaving three neutral rows. The server never sends another player's live ranks, even after the match. It records captured ranks and keeps only eight private field reports per player. Updates arrive at least every 250 ms; displayed countdowns interpolate locally, while deadlines are enforced by the server.

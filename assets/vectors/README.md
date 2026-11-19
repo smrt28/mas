@@ -39,5 +39,5 @@ python3 tools/trace_pieces.py
 POTRACE=/path/to/potrace python3 tools/trace_pieces.py
 ```
 
-`tools/extract_assets.py` also exports these committed masters after extracting
-the board and cover. It does not replace the traces with soft scan crops.
+`tools/extract_assets.py` also exports these committed masters while preserving
+the restored board and cover. It does not replace the traces with soft scan crops.
