@@ -718,9 +718,9 @@ fn paint(
                         &mut cmd,
                         art.ranks[rank as usize].clone(),
                         x,
-                        y + 4.,
+                        y + 5.,
                         40.,
-                        38.,
+                        40.,
                         4.,
                     );
                     label(

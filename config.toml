@@ -1,7 +1,7 @@
 # The server owns all clocks, rules, rooms and hidden ranks. Nothing is persisted.
 bind = "0.0.0.0:4000"
-placement_seconds = 120
-move_seconds = 5
+placement_seconds = 240
+move_seconds = 10
 # Three consecutive missed turns lose the game.
 max_missed_turns = 3
 # Draw after this many moves without a capture (prevents endless repetition).

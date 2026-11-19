@@ -1,6 +1,6 @@
 # Maršál a špión
 
-A two-player hidden-army board game in Rust, with a native **Bevy 0.18** client and an authoritative TCP server. Rules and original scanned graphics come from [`mas.pdf`](mas.pdf), especially pages 4–5. The complete 10×11 board and sharper piece symbols come from [`tmp/mas-plan.pdf`](tmp/mas-plan.pdf). No database, accounts, save files, or persistent matches: restarting the server removes everything.
+A two-player hidden-army board game in Rust, with a native **Bevy 0.18** client and an authoritative TCP server. Rules and original scanned graphics come from [`mas.pdf`](mas.pdf), especially pages 4–5. The complete 10×11 board and original piece references come from [`tmp/mas-plan.pdf`](tmp/mas-plan.pdf). No database, accounts, save files, or persistent matches: restarting the server removes everything.
 
 ## Run
 
@@ -80,8 +80,9 @@ cargo run --bin mas-client -- --headless --preview --screenshot /tmp/mas-preview
 - `src/net.rs`: bounded newline-delimited JSON framing.
 - `src/bin/server.rs`: single game-state owner with bounded I/O queues, per-connection readers/writers, monotonic clocks, limits and disconnect cleanup.
 - `src/bin/client.rs`: Bevy 2D interface, game-name entry, deployment, board interaction, clocks and field reports. Network work runs off the render thread.
-- `assets/`: the complete printed board, transparent high-resolution rank symbols, cover artwork and a bundled DejaVu font with its license. Bevy loads this directory relative to the compiled source location; retain it when running the binaries.
-- `tools/extract_assets.py`: reproducible extraction from the supplied PDFs, requiring Poppler (`pdftoppm`) and Python Pillow.
+- `assets/`: the complete printed board, solid-black transparent piece PNGs with traced SVG masters in `assets/vectors/`, cover artwork and a bundled DejaVu font with its license. Bevy loads this directory relative to the compiled source location; retain it when running the binaries.
+- `tools/extract_assets.py`: extracts the board and exports piece PNGs from the committed SVG masters. It preserves the upright, AI-restored cover, with an upright raw-PDF fallback if that asset is missing. See [cover restoration and prompts](assets/cover-restoration.md). Requires Poppler (`pdftoppm`), librsvg (`rsvg-convert`), and Python Pillow.
+- `tools/trace_pieces.py`: reproduces the SVG traces from the PDF's original embedded scan, using Potrace, Poppler (`pdfimages`), librsvg, and Pillow. The corporal uses the intact red-side reference. See [`assets/vectors/README.md`](assets/vectors/README.md).
 
 The wire protocol is one JSON object per newline: actions use a `type` field (`join`, `place`, `remove`, `auto_place`, `ready`, `move`, `resign`); replies are `state` or `error`. Coordinates are indices `0..109`, with index `y * 10 + x` on the 10-column, 11-row board; A11 is index 0 and J1 is index 109. The six blocked squares are D5–D7 and G5–G7; each commander deploys in their four back rows, leaving three neutral rows. The server never sends another player's live ranks, even after the match. It records captured ranks and keeps only eight private field reports per player. Updates arrive at least every 250 ms; displayed countdowns interpolate locally, while deadlines are enforced by the server.
 
