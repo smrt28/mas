@@ -20,6 +20,12 @@ const BOARD_WIDTH: f32 = COLS as f32 * CELL;
 const BOARD_HEIGHT: f32 = ROWS as f32 * CELL;
 const LEFT: f32 = -570.;
 const TOP: f32 = 290.;
+const LOGIN_X: f32 = 385.;
+const LOGIN_WIDTH: f32 = 350.;
+const LOGIN_FIELD_HEIGHT: f32 = 36.;
+const LOGIN_SERVER_Y: f32 = -258.;
+const LOGIN_GAME_Y: f32 = -302.;
+const LOGIN_ENTER_Y: f32 = -346.;
 #[derive(Component)]
 struct Painted;
 #[derive(Component)]
@@ -387,15 +393,21 @@ fn input(
     let right = mouse.just_pressed(MouseButton::Right);
     if c.view.is_none() {
         if clicked {
-            if hit(pos, 0., 110., 600., 56.) {
+            if hit(
+                pos,
+                LOGIN_X,
+                LOGIN_SERVER_Y,
+                LOGIN_WIDTH,
+                LOGIN_FIELD_HEIGHT,
+            ) {
                 c.field = 0;
                 c.dirty = true;
             }
-            if hit(pos, 0., 20., 600., 56.) {
+            if hit(pos, LOGIN_X, LOGIN_GAME_Y, LOGIN_WIDTH, LOGIN_FIELD_HEIGHT) {
                 c.field = 1;
                 c.dirty = true;
             }
-            if hit(pos, 0., -90., 600., 56.) && !c.connecting {
+            if hit(pos, LOGIN_X, LOGIN_ENTER_Y, LOGIN_WIDTH, 34.) && !c.connecting {
                 c.connect();
             }
         }
@@ -539,51 +551,53 @@ fn paint(
     let ink = Color::srgb(0.94, 0.88, 0.74);
     let muted = Color::srgb(0.61, 0.66, 0.64);
     let gold = Color::srgb(0.94, 0.67, 0.32);
-    label(&mut cmd, &art, "MARŠÁL A ŠPIÓN", -575., 402., 36., ink);
-    label(
-        &mut cmd,
-        &art,
-        "HIDDEN ARMIES  /  OPEN POSSIBILITIES",
-        -572.,
-        365.,
-        13.,
-        muted,
-    );
-    label(&mut cmd, &art, "F1  Field manual", 395., 402., 15., muted);
-    if c.view.is_none() {
-        picture(&mut cmd, art.cover.clone(), 0., -40., 1190., 740., 0.);
-        rect(
-            &mut cmd,
-            0.,
-            -20.,
-            740.,
-            610.,
-            1.,
-            Color::srgba(0.035, 0.05, 0.055, 0.95),
-        );
-        label(&mut cmd, &art, "Take command.", -300., 235., 34., ink);
+    if c.view.is_some() {
+        label(&mut cmd, &art, "MARŠÁL A ŠPIÓN", -575., 402., 36., ink);
         label(
             &mut cmd,
             &art,
-            "Choose the same game name as your opponent.",
-            -300.,
-            190.,
-            17.,
+            "HIDDEN ARMIES  /  OPEN POSSIBILITIES",
+            -572.,
+            365.,
+            13.,
             muted,
         );
-        for (i, (s, y)) in [
-            (format!("Server   {}", c.address), 110.),
-            (format!("Game     {}", c.room), 20.),
+        label(&mut cmd, &art, "F1  Field manual", 395., 402., 15., muted);
+    }
+    if c.view.is_none() {
+        // The cover carries the title. Keep the login below the title and to
+        // the right of the horse, preserving the artwork's aspect ratio.
+        picture(
+            &mut cmd,
+            art.cover.clone(),
+            0.,
+            0.,
+            1190.,
+            1190. * 1027. / 1532.,
+            0.,
+        );
+        rect(
+            &mut cmd,
+            LOGIN_X,
+            LOGIN_GAME_Y,
+            LOGIN_WIDTH + 32.,
+            164.,
+            1.,
+            Color::srgba(0.035, 0.05, 0.055, 0.90),
+        );
+        for (i, (name, value, y)) in [
+            ("Server:", c.address.as_str(), LOGIN_SERVER_Y),
+            ("Game:", c.room.as_str(), LOGIN_GAME_Y),
         ]
         .into_iter()
         .enumerate()
         {
             rect(
                 &mut cmd,
-                0.,
+                LOGIN_X,
                 y,
-                600.,
-                56.,
+                LOGIN_WIDTH,
+                LOGIN_FIELD_HEIGHT,
                 3.,
                 if c.field == i {
                     Color::srgb(0.24, 0.29, 0.29)
@@ -591,49 +605,59 @@ fn paint(
                     Color::srgb(0.12, 0.16, 0.17)
                 },
             );
-            label(&mut cmd, &art, s, -280., y, 21., ink);
+            label(
+                &mut cmd,
+                &art,
+                name,
+                LOGIN_X - LOGIN_WIDTH / 2. + 12.,
+                y,
+                16.,
+                ink,
+            );
+            // Show the end of long input without letting it spill over the art.
+            let tail: String = value
+                .chars()
+                .rev()
+                .take(28)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let display = if value.chars().count() > 28 {
+                format!("…{tail}")
+            } else {
+                tail
+            };
+            label(
+                &mut cmd,
+                &art,
+                display,
+                LOGIN_X - LOGIN_WIDTH / 2. + 80.,
+                y,
+                16.,
+                ink,
+            );
         }
         button(
             &mut cmd,
             &art,
-            if c.connecting {
-                "Connecting…"
-            } else {
-                "ENTER  /  Join or create game"
-            },
-            0.,
-            -90.,
-            600.,
+            "Enter",
+            LOGIN_X,
+            LOGIN_ENTER_Y,
+            LOGIN_WIDTH,
             true,
         );
-        label(
-            &mut cmd,
-            &art,
-            "Tab switches fields. Enter connects.",
-            -300.,
-            -150.,
-            16.,
-            muted,
-        );
-        label(
-            &mut cmd,
-            &art,
-            "Two commanders · 40 pieces each · one hidden flag",
-            -300.,
-            -195.,
-            15.,
-            muted,
-        );
-        label(
-            &mut cmd,
-            &art,
-            "All matches live in server memory only.",
-            -300.,
-            -230.,
-            15.,
-            muted,
-        );
-        label(&mut cmd, &art, wrap(&c.error, 68), -300., -285., 14., gold);
+        if !c.error.is_empty() {
+            label(
+                &mut cmd,
+                &art,
+                wrap(&c.error, 44),
+                LOGIN_X - LOGIN_WIDTH / 2.,
+                -414.,
+                13.,
+                gold,
+            );
+        }
     } else if let Some(v) = &c.view {
         label(
             &mut cmd,
