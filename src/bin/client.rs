@@ -1111,19 +1111,6 @@ fn paint_piece(cmd: &mut Commands, art: &Art, piece: &VisiblePiece, visual: Piec
             },
             Transform::from_xyz(point.x, point.y, 4. + layer),
         ));
-    } else {
-        cmd.spawn((
-            Painted,
-            Text2d::new("?"),
-            TextFont {
-                font: art.font.clone(),
-                font_size: 24. * scale,
-                ..default()
-            },
-            TextColor(Color::srgba(0.18, 0.13, 0.1, opacity)),
-            Anchor::CENTER_LEFT,
-            Transform::from_xyz(point.x - 7. * scale, point.y, 8. + layer),
-        ));
     }
 }
 fn paint(
