@@ -616,3 +616,6 @@ pub fn orient(at: usize, owner: usize) -> usize {
     if owner == 0 { at } else { CELLS - 1 - at }
 }
 pub mod plan;
+
+/// Irreversible runtime confinement for the dedicated multiplayer server.
+pub mod sandbox;

@@ -28,8 +28,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cfg.validate()?;
     let listener = TcpListener::bind(&cfg.bind)?;
     listener.set_nonblocking(true)?;
+    marsal_a_spion::sandbox::enter(&listener)
+        .map_err(|error| format!("Cannot install server sandbox: {error}"))?;
     println!(
-        "Maršál a špión — listening on {} (memory only)",
+        "Maršál a špión — listening on {} (memory only, sandboxed)",
         listener.local_addr()?
     );
     let (tx, rx) = mpsc::sync_channel(1024);

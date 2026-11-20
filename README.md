@@ -85,6 +85,16 @@ cargo run --bin mas-client -- --headless --preview --screenshot /tmp/mas-preview
 
 `--preview` is an offline artwork preview, not a local opponent.
 
+## Server sandbox
+
+The server requires 64-bit Linux (x86_64, aarch64 or riscv64), Linux 5.9+ with seccomp filtering enabled. It reads and validates configuration and binds the listening socket first, then irreversibly drops filesystem access before accepting players. Startup fails if sandbox setup fails; there is no unsandboxed fallback or disable switch. The graphical client is unaffected.
+
+The server uses the `seccompiler` library to install a syscall allowlist with `no_new_privs` and thread synchronization. Current and future worker threads are confined. File opens, directory listing, path metadata, file creation/modification/deletion, file-backed memory mappings, process execution, new sockets, descriptor imports and io_uring are blocked. Only the existing TCP listener, accepted connections, runtime memory/thread operations, clocks and OS randomness remain available.
+
+Inherited descriptors are closed except for the listener and safe logging streams. Standard input becomes `/dev/null`; stdout/stderr remain usable when they are terminals, pipes or sockets. If either is a regular file, it is replaced with `/dev/null`, so even redirected disk logs cannot retain filesystem access. For file logging, pipe output to a separate process that owns the file, for example `target/release/mas-server config.toml 2>&1 | tee server.log`.
+
+The subprocess sandbox tests verify denied file reads/writes, creation, metadata, directory listing, rename and deletion, closed inherited disk descriptors, neutralized file-backed standard streams, blocked executable/async-I/O bypasses, and enforcement on both existing and newly spawned threads. The full TCP integration test exercises authentication, lobby discovery, gameplay, capture events, timers and disconnects against the sandboxed server.
+
 ## Authenticated transport
 
 All TCP connections, including waiting-game discovery, authenticate before joining a room or receiving game data. The server sends only a plaintext `MAS\x01` marker and a cryptographically random 64-bit session number before authentication. Both sides enforce a three-second total authentication deadline. Unauthenticated peers count toward connection limits but never occupy a player slot.
@@ -99,6 +109,7 @@ The live TCP test checks valid authenticated discovery/joining, wrong-key and un
 
 - `src/lib.rs`: deterministic rule validation, combat, player-specific views and wire types; random deployment and starting player.
 - `src/session.rs`: in-memory named-room coordinator shared by tests and server.
+- `src/sandbox.rs`: irreversible Linux server confinement and inherited-descriptor cleanup.
 - `src/plan.rs`: shared source-PDF geometry, exact-size window layout, rotated cell and printed-piece picking.
 - `src/net.rs`: bounded newline-delimited JSON framing.
 - `src/bin/server.rs`: single game-state owner with bounded I/O queues, per-connection readers/writers, monotonic clocks, limits and disconnect cleanup.
