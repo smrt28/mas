@@ -3,7 +3,7 @@ bind = "0.0.0.0:4000"
 placement_seconds = 5
 move_seconds = 10
 # Three consecutive missed turns lose the game.
-max_missed_turns = 3
+max_missed_turns = 15
 # Draw after this many moves without a capture (prevents endless repetition).
 quiet_move_limit = 200
 max_rooms = 128

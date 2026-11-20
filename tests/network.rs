@@ -257,13 +257,52 @@ fn tcp_matchmaking_privacy_moves_timeouts_and_disconnects() {
                 .all(|p| p.rank.is_none())
         );
     }
-    if av.turn == 0 {
-        a.send(Action::Move { from: 70, to: 60 });
-    } else {
-        b.send(Action::Move { from: 30, to: 40 });
+    // Both marshals advance through the neutral column and meet on move four.
+    // The same authoritative capture reaches both authenticated clients.
+    for ply in 1..=4 {
+        let you = (av.turn + ply - 1) % 2;
+        let from = match (you, ply <= 2) {
+            (0, true) => 70,
+            (1, true) => 30,
+            (0, false) => 60,
+            _ => 40,
+        };
+        let to = if ply > 2 {
+            50
+        } else if you == 0 {
+            60
+        } else {
+            40
+        };
+        if you == 0 {
+            a.send(Action::Move { from, to });
+        } else {
+            b.send(Action::Move { from, to });
+        }
+        let first = a.until(|v| v.ply == ply as u32);
+        let second = b.until(|v| v.ply == ply as u32);
+        if ply == 4 {
+            let capture = first.motion.as_ref().unwrap();
+            assert_eq!((capture.ply, capture.from, capture.to), (4, from, 50));
+            assert!(capture.piece_lost && capture.defender_lost);
+            assert_eq!(capture.piece.rank, Some(Rank::Marshal));
+            assert_eq!(
+                serde_json::to_value(&first.motion).unwrap(),
+                serde_json::to_value(&second.motion).unwrap()
+            );
+            assert!(first.board[50].is_none() && second.board[50].is_none());
+        } else {
+            let first = first.motion.as_ref().unwrap();
+            let second = second.motion.as_ref().unwrap();
+            assert_eq!((first.ply, first.from, first.to), (ply as u32, from, to));
+            assert_eq!(
+                (first.from, first.to, first.elapsed_ms),
+                (second.from, second.to, second.elapsed_ms)
+            );
+            assert!(first.defender.is_none() && second.defender.is_none());
+            assert!(!first.piece_lost && !second.piece_lost);
+        }
     }
-    a.until(|v| v.ply == 1);
-    b.until(|v| v.ply == 1);
     // The server independently enforces the configured two-second turn limit.
     let end = a.until(|v| matches!(v.phase, Phase::Finished { .. }));
     assert!(matches!(

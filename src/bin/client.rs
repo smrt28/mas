@@ -143,6 +143,31 @@ enum Event {
     Reply(Reply),
     Failed(String),
 }
+const MOVE_TRAVEL_MS: f32 = 180.;
+const CAPTURE_FADE_MS: f32 = 220.;
+const CAPTURE_DURATION_MS: f32 = MOVE_TRAVEL_MS + CAPTURE_FADE_MS;
+struct MovePlayback {
+    event: MoveView,
+    received: Instant,
+}
+impl MovePlayback {
+    fn elapsed_ms(&self) -> f32 {
+        self.event.elapsed_ms as f32 + self.received.elapsed().as_secs_f32() * 1000.
+    }
+}
+fn motion_duration_ms(event: &MoveView) -> f32 {
+    if event.defender.is_some() {
+        CAPTURE_DURATION_MS
+    } else {
+        MOVE_TRAVEL_MS
+    }
+}
+fn motion_sample(elapsed_ms: f32) -> (f32, f32) {
+    let travel = (elapsed_ms / MOVE_TRAVEL_MS).clamp(0., 1.);
+    let travel = travel * travel * (3. - 2. * travel);
+    let opacity = 1. - ((elapsed_ms - MOVE_TRAVEL_MS) / CAPTURE_FADE_MS).clamp(0., 1.);
+    (travel, opacity)
+}
 #[derive(Resource)]
 struct Client {
     address: String,
@@ -166,6 +191,7 @@ struct Client {
     lobby: Lobby,
     join_waiting: bool,
     connected_address: String,
+    motion: Option<MovePlayback>,
 }
 impl Client {
     fn send(&mut self, a: Action) -> bool {
@@ -196,6 +222,7 @@ impl Client {
         self.tx = None;
         self.view = None;
         self.selected = None;
+        self.motion = None;
         self.ready_sent = false;
         self.broken = false;
         self.error.clear();
@@ -215,6 +242,7 @@ impl Client {
         self.selected = None;
         self.error.clear();
         self.broken = true;
+        self.motion = None;
         self.dirty = true;
     }
     fn connect(&mut self) {
@@ -376,6 +404,7 @@ fn main() {
         lobby: Lobby::default(),
         join_waiting: false,
         connected_address: String::new(),
+        motion: None,
     };
     if autojoin {
         client.connect();
@@ -415,6 +444,7 @@ fn main() {
                 browse,
                 receive,
                 fit_surface,
+                animate_motion,
                 input,
                 paint,
                 clock_text,
@@ -652,6 +682,25 @@ fn receive(mut c: ResMut<Client>) {
                     c.selected = None;
                     c.error.clear();
                 }
+                let new_ply = c
+                    .view
+                    .as_ref()
+                    .is_some_and(|old| old.game == view.game && view.ply > old.ply);
+                if new_ply {
+                    c.motion = view
+                        .motion
+                        .as_ref()
+                        .filter(|event| {
+                            event.ply == view.ply
+                                && (event.elapsed_ms as f32) < motion_duration_ms(event)
+                        })
+                        .cloned()
+                        .map(|event| MovePlayback {
+                            event: *event,
+                            received: Instant::now(),
+                        });
+                    c.selected = None;
+                }
                 c.view = Some(view);
                 c.received = Instant::now();
                 c.dirty = true;
@@ -679,6 +728,14 @@ fn receive(mut c: ResMut<Client>) {
                 c.dirty = true;
             }
         }
+    }
+}
+fn animate_motion(mut c: ResMut<Client>) {
+    if let Some(capture) = &c.motion {
+        if capture.elapsed_ms() >= motion_duration_ms(&capture.event) {
+            c.motion = None;
+        }
+        c.dirty = true;
     }
 }
 fn input(
@@ -818,6 +875,9 @@ fn input(
         if clicked && result_ok(surface.layout).contains(point) {
             c.leave();
         }
+        return;
+    }
+    if c.motion.is_some() {
         return;
     }
     if surface.layout.in_bar(point) {
@@ -978,6 +1038,80 @@ fn shortened(s: &str, max: usize) -> String {
             .take(max - 1)
             .chain(std::iter::once('…'))
             .collect()
+    }
+}
+struct PieceVisual {
+    point: plan::Point,
+    size: Vec2,
+    scale: f32,
+    opacity: f32,
+    layer: f32,
+}
+fn paint_piece(cmd: &mut Commands, art: &Art, piece: &VisiblePiece, visual: PieceVisual) {
+    let PieceVisual {
+        point,
+        size,
+        scale,
+        opacity,
+        layer,
+    } = visual;
+    let face = if piece.owner == 0 {
+        Color::srgb(0.87, 0.36, 0.28)
+    } else {
+        Color::srgb(0.96, 0.94, 0.87)
+    };
+    rect(
+        cmd,
+        point.x + 1.5 * scale,
+        point.y - 1.5 * scale,
+        size.x - 10. * scale,
+        size.y - 8. * scale,
+        2.5 + layer,
+        Color::srgba(0.1, 0.07, 0.04, 0.4 * opacity),
+    );
+    rect(
+        cmd,
+        point.x,
+        point.y,
+        size.x - 10. * scale,
+        size.y - 8. * scale,
+        3. + layer,
+        face.with_alpha(opacity),
+    );
+    border(
+        cmd,
+        point.x,
+        point.y,
+        size.x - 10. * scale,
+        size.y - 8. * scale,
+        3.5 + layer,
+        Color::srgba(0.42, 0.29, 0.17, opacity),
+    );
+    if let Some(rank) = piece.rank {
+        let side = size.x.min(size.y) - 15. * scale;
+        cmd.spawn((
+            Painted,
+            Sprite {
+                image: art.ranks[rank as usize].clone(),
+                custom_size: Some(Vec2::splat(side)),
+                color: Color::srgba(1., 1., 1., opacity),
+                ..default()
+            },
+            Transform::from_xyz(point.x, point.y, 4. + layer),
+        ));
+    } else {
+        cmd.spawn((
+            Painted,
+            Text2d::new("?"),
+            TextFont {
+                font: art.font.clone(),
+                font_size: 24. * scale,
+                ..default()
+            },
+            TextColor(Color::srgba(0.18, 0.13, 0.1, opacity)),
+            Anchor::CENTER_LEFT,
+            Transform::from_xyz(point.x - 7. * scale, point.y, 8. + layer),
+        ));
     }
 }
 fn paint(
@@ -1263,62 +1397,73 @@ fn paint(
                 gold,
             );
         }
-        if let Some(piece) = &v.board[at] {
-            let face = if piece.owner == 0 {
-                Color::srgb(0.87, 0.36, 0.28)
-            } else {
-                Color::srgb(0.96, 0.94, 0.87)
-            };
-            rect(
-                &mut cmd,
-                point.x + 1.5 * scale,
-                point.y - 1.5 * scale,
-                w - 10. * scale,
-                h - 8. * scale,
-                2.5,
-                Color::srgba(0.1, 0.07, 0.04, 0.4),
-            );
-            rect(
-                &mut cmd,
-                point.x,
-                point.y,
-                w - 10. * scale,
-                h - 8. * scale,
-                3.,
-                face,
-            );
-            border(
-                &mut cmd,
-                point.x,
-                point.y,
-                w - 10. * scale,
-                h - 8. * scale,
-                3.5,
-                Color::srgb(0.42, 0.29, 0.17),
-            );
-            if let Some(rank) = piece.rank {
-                let size = w.min(h) - 15. * scale;
-                picture(
-                    &mut cmd,
-                    art.ranks[rank as usize].clone(),
-                    point.x,
-                    point.y,
-                    size,
-                    size,
-                    4.,
-                );
-            } else {
-                label(
-                    &mut cmd,
-                    &art,
-                    "?",
-                    point.x - 7. * scale,
-                    point.y,
-                    24. * scale,
-                    Color::srgb(0.18, 0.13, 0.1),
-                );
-            }
+        if c.motion
+            .as_ref()
+            .is_some_and(|capture| at == capture.event.from || at == capture.event.to)
+        {
+            continue;
         }
+        if let Some(piece) = &v.board[at] {
+            paint_piece(
+                &mut cmd,
+                &art,
+                piece,
+                PieceVisual {
+                    point,
+                    size: Vec2::new(w, h),
+                    scale,
+                    opacity: 1.,
+                    layer: 0.,
+                },
+            );
+        }
+    }
+    if let Some(capture) = &c.motion {
+        let event = &capture.event;
+        let (travel, opacity) = motion_sample(capture.elapsed_ms());
+        let from = layout.world(plan::cell(event.from).center(), v.you);
+        let to = layout.world(plan::cell(event.to).center(), v.you);
+        let size = Vec2::new(
+            plan::STEP / plan::PAGE_WIDTH * layout.board_width,
+            plan::STEP / plan::PAGE_HEIGHT * layout.board_height,
+        );
+        if let Some(defender) = &event.defender {
+            paint_piece(
+                &mut cmd,
+                &art,
+                defender,
+                PieceVisual {
+                    point: to,
+                    size,
+                    scale,
+                    opacity: if event.defender_lost { opacity } else { 1. },
+                    layer: if travel >= 1. && event.defender_lost {
+                        5.
+                    } else {
+                        0.
+                    },
+                },
+            );
+        }
+        paint_piece(
+            &mut cmd,
+            &art,
+            &event.piece,
+            PieceVisual {
+                point: plan::Point {
+                    x: from.x + (to.x - from.x) * travel,
+                    y: from.y + (to.y - from.y) * travel,
+                },
+                size,
+                scale,
+                opacity: if event.piece_lost { opacity } else { 1. },
+                layer: if travel < 1. || event.piece_lost {
+                    7.
+                } else {
+                    0.
+                },
+            },
+        );
     }
     for (rank, count) in &v.reserve {
         let card = plan::card(*rank, v.you);
@@ -1672,6 +1817,7 @@ mod tests {
             lobby: Lobby::default(),
             join_waiting: false,
             connected_address: String::new(),
+            motion: None,
         };
         (client, events_tx, actions_rx)
     }
@@ -1741,6 +1887,241 @@ mod tests {
         );
         app.world_mut().resource_mut::<Client>().leave();
         server.join().unwrap();
+    }
+    #[test]
+    fn ordinary_and_scout_moves_slide_without_fading_on_both_boards() {
+        for (rank, to) in [(Rank::Cadet, 45), (Rank::Scout, 74)] {
+            for mover in 0..2 {
+                for you in 0..2 {
+                    let cfg = Config::default();
+                    let mut game = Game::new(0, &cfg);
+                    game.phase = Phase::Playing;
+                    game.deadline = 5000;
+                    game.turn = mover;
+                    game.board[44] = Some(Piece { owner: mover, rank });
+                    game.board[90] = Some(Piece {
+                        owner: 0,
+                        rank: Rank::Miner,
+                    });
+                    game.board[9] = Some(Piece {
+                        owner: 1,
+                        rank: Rank::Miner,
+                    });
+                    let (mut client, events, _) = fixture();
+                    client.view = Some(game.view(you, "motion", 0));
+                    let mut app = App::new();
+                    app.insert_resource(client)
+                        .init_resource::<Surface>()
+                        .insert_resource(Art {
+                            font: default(),
+                            bold_font: default(),
+                            ranks: vec![Handle::default(); 11],
+                            board: default(),
+                            cover: default(),
+                        })
+                        .add_systems(Update, (receive, animate_motion, paint).chain());
+                    app.update();
+                    game.apply(mover, Action::Move { from: 44, to }, 1, &cfg)
+                        .unwrap();
+                    let view = game.view(you, "motion", 1);
+                    events
+                        .send((0, Event::Reply(Reply::State { view: view.clone() })))
+                        .unwrap();
+                    app.update();
+                    for ((w, h), age) in [(360., 480.), (1200., 900.), (400., 1600.)]
+                        .into_iter()
+                        .zip([0_u64, 90, 150])
+                    {
+                        let layout = plan::Layout::new(w, h);
+                        app.world_mut().resource_mut::<Surface>().layout = layout;
+                        let received = Instant::now();
+                        {
+                            let mut client = app.world_mut().resource_mut::<Client>();
+                            let motion = client.motion.as_mut().unwrap();
+                            assert_eq!(motion_duration_ms(&motion.event), 180.);
+                            motion.event.elapsed_ms = age;
+                            motion.received = received;
+                        }
+                        events
+                            .send((0, Event::Reply(Reply::State { view: view.clone() })))
+                            .unwrap();
+                        app.update();
+                        assert_eq!(
+                            app.world()
+                                .resource::<Client>()
+                                .motion
+                                .as_ref()
+                                .unwrap()
+                                .received,
+                            received
+                        );
+                        let travel = motion_sample(age as f32).0;
+                        let from = layout.world(plan::cell(44).center(), you);
+                        let target = layout.world(plan::cell(to).center(), you);
+                        let expected = Vec2::new(
+                            from.x + (target.x - from.x) * travel,
+                            from.y + (target.y - from.y) * travel,
+                        );
+                        let mut sprites = app.world_mut().query::<(&Sprite, &Transform)>();
+                        let (sprite, transform) = sprites
+                            .iter(app.world())
+                            .find(|(_, t)| t.translation.z == 10.)
+                            .unwrap();
+                        assert!(transform.translation.truncate().distance(expected) < 3.);
+                        assert_eq!(sprite.color.alpha(), 1.);
+                    }
+                    app.world_mut()
+                        .resource_mut::<Client>()
+                        .motion
+                        .as_mut()
+                        .unwrap()
+                        .event
+                        .elapsed_ms = 181;
+                    app.update();
+                    assert!(app.world().resource::<Client>().motion.is_none());
+                    events
+                        .send((0, Event::Reply(Reply::State { view })))
+                        .unwrap();
+                    app.update();
+                    assert!(app.world().resource::<Client>().motion.is_none());
+                    let layout = app.world().resource::<Surface>().layout;
+                    let target = layout.world(plan::cell(to).center(), you);
+                    let mut sprites = app.world_mut().query::<(&Sprite, &Transform)>();
+                    assert!(sprites.iter(app.world()).any(|(sprite, transform)| {
+                        transform.translation.z == 3.
+                            && (transform.translation.x - target.x).abs() < 0.001
+                            && (transform.translation.y - target.y).abs() < 0.001
+                            && sprite.color.alpha() == 1.
+                    }));
+                }
+            }
+        }
+    }
+    #[test]
+    fn captures_move_then_fade_the_losers_on_both_rotated_boards_without_restarting() {
+        for (attacker, defender) in [
+            (Rank::General, Rank::Cadet),
+            (Rank::Cadet, Rank::General),
+            (Rank::General, Rank::General),
+            (Rank::Spy, Rank::Marshal),
+            (Rank::Miner, Rank::Mine),
+            (Rank::Cadet, Rank::Flag),
+        ] {
+            for you in 0..2 {
+                let cfg = Config::default();
+                let mut game = Game::new(0, &cfg);
+                game.phase = Phase::Playing;
+                game.deadline = 5000;
+                game.board[44] = Some(Piece {
+                    owner: 0,
+                    rank: attacker,
+                });
+                game.board[45] = Some(Piece {
+                    owner: 1,
+                    rank: defender,
+                });
+                game.board[90] = Some(Piece {
+                    owner: 0,
+                    rank: Rank::Miner,
+                });
+                game.board[9] = Some(Piece {
+                    owner: 1,
+                    rank: Rank::Miner,
+                });
+                let (mut client, events, _) = fixture();
+                client.view = Some(game.view(you, "capture", 0));
+                let mut app = App::new();
+                app.insert_resource(client)
+                    .init_resource::<Surface>()
+                    .insert_resource(Art {
+                        font: default(),
+                        bold_font: default(),
+                        ranks: vec![Handle::default(); 11],
+                        board: default(),
+                        cover: default(),
+                    })
+                    .add_systems(Update, (receive, animate_motion, paint).chain());
+                app.update();
+                game.apply(0, Action::Move { from: 44, to: 45 }, 1, &cfg)
+                    .unwrap();
+                let view = game.view(you, "capture", 1);
+                events
+                    .send((0, Event::Reply(Reply::State { view: view.clone() })))
+                    .unwrap();
+                app.update();
+                assert!(app.world().resource::<Client>().motion.is_some());
+                for ((w, h), age) in [(600., 881.), (1200., 900.), (400., 1600.), (360., 480.)]
+                    .into_iter()
+                    .zip([0_u64, 90, 180, 290])
+                {
+                    let layout = plan::Layout::new(w, h);
+                    app.world_mut().resource_mut::<Surface>().layout = layout;
+                    let received = Instant::now();
+                    {
+                        let mut client = app.world_mut().resource_mut::<Client>();
+                        let capture = client.motion.as_mut().unwrap();
+                        capture.event.elapsed_ms = age;
+                        capture.received = received;
+                    }
+                    // Repeated state broadcasts must not reset an ongoing animation.
+                    events
+                        .send((0, Event::Reply(Reply::State { view: view.clone() })))
+                        .unwrap();
+                    app.update();
+                    assert_eq!(
+                        app.world()
+                            .resource::<Client>()
+                            .motion
+                            .as_ref()
+                            .unwrap()
+                            .received,
+                        received
+                    );
+                    let (travel, opacity) = motion_sample(age as f32);
+                    let from = layout.world(plan::cell(44).center(), you);
+                    let to = layout.world(plan::cell(45).center(), you);
+                    let attack_point = plan::Point {
+                        x: from.x + (to.x - from.x) * travel,
+                        y: from.y + (to.y - from.y) * travel,
+                    };
+                    let result = combat(attacker, defender);
+                    let attacker_layer = if travel < 1. || result <= 0 { 7. } else { 0. };
+                    let defender_layer = if travel >= 1. && result >= 0 { 5. } else { 0. };
+                    let mut sprites = app.world_mut().query::<(&Sprite, &Transform)>();
+                    for (point, layer, alpha) in [
+                        (
+                            attack_point,
+                            attacker_layer,
+                            if result <= 0 { opacity } else { 1. },
+                        ),
+                        (to, defender_layer, if result >= 0 { opacity } else { 1. }),
+                    ] {
+                        let (sprite, _) = sprites
+                            .iter(app.world())
+                            .find(|(_, t)| {
+                                (t.translation.z - (3. + layer)).abs() < 0.001
+                                    && (t.translation.x - point.x).abs() < 2.
+                                    && (t.translation.y - point.y).abs() < 2.
+                            })
+                            .unwrap();
+                        assert!((sprite.color.alpha() - alpha).abs() < 0.03);
+                    }
+                }
+                {
+                    let mut client = app.world_mut().resource_mut::<Client>();
+                    client.motion.as_mut().unwrap().event.elapsed_ms = 401;
+                }
+                app.update();
+                assert!(app.world().resource::<Client>().motion.is_none());
+                events
+                    .send((0, Event::Reply(Reply::State { view })))
+                    .unwrap();
+                app.update();
+                assert!(app.world().resource::<Client>().motion.is_none());
+                let mut sprites = app.world_mut().query_filtered::<&Transform, With<Sprite>>();
+                assert!(!sprites.iter(app.world()).any(|t| t.translation.z > 9.));
+            }
+        }
     }
     #[test]
     fn waiting_games_can_be_joined_from_every_page_at_different_sizes_and_dpi() {

@@ -440,3 +440,83 @@ fn new_bottom_row_moves_attacks_and_bounds_work() {
     assert_eq!(g.board[108].unwrap().rank, Rank::Captain);
     assert!(g.board[109].is_none());
 }
+
+#[test]
+fn capture_events_share_outcomes_and_timeline_without_revealing_surviving_attackers() {
+    for (attacker, defender, attacker_lost, defender_lost) in [
+        (Rank::General, Rank::Cadet, false, true),
+        (Rank::Cadet, Rank::General, true, false),
+        (Rank::General, Rank::General, true, true),
+        (Rank::Spy, Rank::Marshal, false, true),
+        (Rank::Miner, Rank::Mine, false, true),
+        (Rank::Cadet, Rank::Flag, false, true),
+    ] {
+        let (mut game, cfg) = sparse();
+        put(&mut game, 44, 0, attacker);
+        put(&mut game, 45, 1, defender);
+        assert!(game.view(0, "capture", 0).motion.is_none());
+        game.apply(0, Action::Move { from: 44, to: 45 }, 100, &cfg)
+            .unwrap();
+        for you in 0..2 {
+            let view: View = serde_json::from_str(
+                &serde_json::to_string(&game.view(you, "capture", 125)).unwrap(),
+            )
+            .unwrap();
+            let event = view.motion.unwrap();
+            assert_eq!(
+                (event.ply, event.from, event.to, event.elapsed_ms),
+                (1, 44, 45, 25)
+            );
+            assert_eq!(
+                (event.piece_lost, event.defender_lost),
+                (attacker_lost, defender_lost)
+            );
+            assert_eq!(event.defender.as_ref().unwrap().rank, Some(defender));
+            let visible = you == 0 || attacker_lost || matches!(game.phase, Phase::Finished { .. });
+            assert_eq!(event.piece.rank, visible.then_some(attacker));
+            assert_eq!(
+                game.view(you, "capture", 350).motion.unwrap().elapsed_ms,
+                250
+            );
+        }
+        if matches!(game.phase, Phase::Playing) {
+            game.apply(1, Action::Move { from: 9, to: 8 }, 130, &cfg)
+                .unwrap();
+            let motion = game.view(0, "capture", 130).motion.unwrap();
+            assert_eq!((motion.ply, motion.from, motion.to), (2, 9, 8));
+            assert!(motion.defender.is_none());
+            assert!(!motion.piece_lost && !motion.defender_lost);
+        }
+    }
+}
+
+#[test]
+fn ordinary_moves_and_long_scout_moves_share_a_timeline_without_exposing_ranks() {
+    for (rank, to) in [(Rank::Cadet, 45), (Rank::Scout, 74)] {
+        for mover in 0..2 {
+            let (mut game, cfg) = sparse();
+            game.turn = mover;
+            put(&mut game, 44, mover, rank);
+            game.apply(mover, Action::Move { from: 44, to }, 100, &cfg)
+                .unwrap();
+            for you in 0..2 {
+                let view: View = serde_json::from_str(
+                    &serde_json::to_string(&game.view(you, "motion", 150)).unwrap(),
+                )
+                .unwrap();
+                let event = view.motion.unwrap();
+                assert_eq!(
+                    (event.ply, event.from, event.to, event.elapsed_ms),
+                    (1, 44, to, 50)
+                );
+                assert_eq!(event.piece.owner, mover);
+                assert_eq!(event.piece.rank, (mover == you).then_some(rank));
+                assert!(event.defender.is_none());
+                assert!(!event.piece_lost && !event.defender_lost);
+                assert!(view.captured.is_empty());
+                assert!(view.board[44].is_none());
+                assert_eq!(view.board[to].as_ref().unwrap().owner, mover);
+            }
+        }
+    }
+}

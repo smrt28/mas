@@ -101,6 +101,26 @@ pub struct VisiblePiece {
     pub owner: usize,
     pub rank: Option<Rank>,
 }
+/// One authoritative move event, personalized only for rank visibility.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MoveView {
+    pub ply: u32,
+    pub from: usize,
+    pub to: usize,
+    pub piece: VisiblePiece,
+    pub defender: Option<VisiblePiece>,
+    pub piece_lost: bool,
+    pub defender_lost: bool,
+    pub elapsed_ms: u64,
+}
+struct MoveEvent {
+    ply: u32,
+    from: usize,
+    to: usize,
+    piece: Piece,
+    defender: Option<Piece>,
+    started_ms: u64,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct View {
     pub game: String,
@@ -115,6 +135,8 @@ pub struct View {
     pub messages: Vec<String>,
     pub missed: [u32; 2],
     pub ply: u32,
+    #[serde(default)]
+    pub motion: Option<Box<MoveView>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -192,6 +214,7 @@ pub struct Game {
     pub missed: [u32; 2],
     pub ply: u32,
     quiet: u32,
+    motion: Option<MoveEvent>,
 }
 impl Game {
     pub fn new(now: u64, cfg: &Config) -> Self {
@@ -206,6 +229,7 @@ impl Game {
             missed: [0; 2],
             ply: 0,
             quiet: 0,
+            motion: None,
         }
     }
     pub fn start(&mut self, now: u64, cfg: &Config) {
@@ -329,6 +353,14 @@ impl Game {
                     return Err("Illegal move: move one square in any direction; attack orthogonally. Scouts may travel on clear orthogonal lines.".into());
                 }
                 let attacker = self.board[from].take().unwrap();
+                self.motion = Some(MoveEvent {
+                    ply: self.ply + 1,
+                    from,
+                    to,
+                    piece: attacker,
+                    defender: self.board[to],
+                    started_ms: now,
+                });
                 if let Some(defender) = self.board[to] {
                     self.note(
                         p,
@@ -468,6 +500,35 @@ impl Game {
             messages: self.messages[p].clone(),
             missed: self.missed,
             ply: self.ply,
+            motion: self
+                .motion
+                .as_ref()
+                .map(|event| {
+                    let result = event
+                        .defender
+                        .map(|defender| combat(event.piece.rank, defender.rank));
+                    let finished = matches!(self.phase, Phase::Finished { .. });
+                    let piece_lost = result.is_some_and(|result| result <= 0);
+                    MoveView {
+                        ply: event.ply,
+                        from: event.from,
+                        to: event.to,
+                        piece: VisiblePiece {
+                            owner: event.piece.owner,
+                            rank: (event.piece.owner == p || piece_lost || finished)
+                                .then_some(event.piece.rank),
+                        },
+                        // The attacker already receives the defending rank privately.
+                        defender: event.defender.map(|defender| VisiblePiece {
+                            owner: defender.owner,
+                            rank: Some(defender.rank),
+                        }),
+                        piece_lost,
+                        defender_lost: result.is_some_and(|result| result >= 0),
+                        elapsed_ms: now.saturating_sub(event.started_ms),
+                    }
+                })
+                .map(Box::new),
         }
     }
 }
