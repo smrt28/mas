@@ -21,3 +21,14 @@ jobs:
       - run: python3 tools/generate_shared_key.py
       - run: cargo build --locked --bin mas-client
       - run: cargo test --locked --features network-tests --bin mas-client
+  windows-client:
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Disposable CI key only; distribution builds use the server's shared key.
+      - run: python tools/generate_shared_key.py
+      - run: cargo build --locked --release --no-default-features --features client --bin mas-client
+      - run: cargo test --locked --release --bin mas-client

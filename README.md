@@ -64,7 +64,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-The 47 rules/session/plan tests include randomized matches, private JSON views, server clocks, inventory conservation, combat exceptions, room isolation and cleanup, exact printed-cell and card picking in both orientations, and a complete deployment/move through those coordinates. Twelve client tests verify automatic Ready, join/leave window sizing, per-player clocks, initial/placed/returned reserve counts, preserved user resizing, every printed card’s clicks, highlight bounds and count anchors after wide/tall and high-DPI resizes, that every game phase fits inside the full sheet and fixed-height bar, the disconnect dialog’s input blocking and return to the main screen, bold flag-capture results with OK acknowledgement, paginated one-click lobby joins with stale-response handling, and ordinary/scout movement plus capture fading across outcomes, perspectives and resizes. Geometry checks cover the PDF aspect ratio, uniform scaling, rotated card/cell picking at several sizes, and ignored clicks in the margins. These tests do not need a GPU, display, or sockets.
+The 47 rules/session/plan tests include randomized matches, private JSON views, server clocks, inventory conservation, combat exceptions, room isolation and cleanup, exact printed-cell and card picking in both orientations, and a complete deployment/move through those coordinates. Thirteen client tests verify automatic Ready, join/leave window sizing, per-player clocks, initial/placed/returned reserve counts, preserved user resizing, every printed card’s clicks, highlight bounds and count anchors after wide/tall and high-DPI resizes, that every game phase fits inside the full sheet and fixed-height bar, the disconnect dialog’s input blocking and return to the main screen, bold flag-capture results with OK acknowledgement, paginated one-click lobby joins with stale-response handling, ordinary/scout movement plus capture fading across outcomes, perspectives and resizes, and all embedded images/fonts loading without an asset directory. Geometry checks cover the PDF aspect ratio, uniform scaling, rotated card/cell picking at several sizes, and ignored clicks in the margins. These tests do not need a GPU, display, or sockets.
 
 The live TCP integration test starts the actual server and connects several clients. It checks waiting-game discovery and direct joining, matchmaking, third-player rejection, private deployment, moves, matching capture events for both players, automatic setup, timeout loss, and interrupted games on disconnect:
 
@@ -84,6 +84,28 @@ cargo run --bin mas-client -- --headless --preview --screenshot /tmp/mas-preview
 ```
 
 `--preview` is an offline artwork preview, not a local opponent.
+
+## Standalone Windows client
+
+The client embeds the board, cover, all eleven piece images, and both fonts into the executable. It loads these from Bevy's in-memory asset source on every platform. No `assets` directory, configuration file, font installation, or separate key file is needed beside the Windows EXE. `mas-client.exe --licenses` displays the embedded font license. The release build uses the Windows GUI subsystem, so opening the client does not open a console window.
+
+To cross-build **only the client** on Linux, install the Rust target and extract an official [LLVM-MinGW UCRT toolchain](https://github.com/mstorsjo/llvm-mingw/releases) for Linux:
+
+```sh
+rustup target add x86_64-pc-windows-gnullvm
+LLVM_MINGW_ROOT=/path/to/llvm-mingw tools/build_windows_client.sh
+```
+
+Use the same `.secrets/multiplayer.key` (or `MAS_SHARED_KEY_FILE`) as the server build. The script builds with static runtime libraries and strips the distribution copy. Give friends only **`target/windows/mas-client.exe`**, intended for 64-bit Windows 10/11 with a compatible graphics driver. No MinGW or Visual C++ runtime installation is required; Windows system libraries and GPU drivers are supplied by Windows/the graphics vendor.
+
+To build natively on 64-bit Windows, install Rust's MSVC toolchain and the Visual Studio C++ build tools, provide the matching build key, and run in PowerShell:
+
+```powershell
+$env:RUSTFLAGS = '-C target-feature=+crt-static'
+cargo build --locked --release --no-default-features --features client --bin mas-client
+```
+
+The native output is `target\release\mas-client.exe`. CI builds and tests the Windows client with a disposable test key; those builds do not use the distribution key. The embedded-asset test decodes every image and font with a deliberately missing filesystem asset directory.
 
 ## Server sandbox
 

@@ -1,3 +1,10 @@
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+#[path = "client/assets.rs"]
+mod client_assets;
+
 use bevy::{
     input::keyboard::{Key, KeyboardInput},
     prelude::*,
@@ -362,6 +369,10 @@ impl Client {
 }
 fn main() {
     let args: Vec<_> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--licenses") {
+        println!("{}", client_assets::FONT_LICENSE);
+        return;
+    }
     let (sender, events) = mpsc::sync_channel(128);
     let preview = args.iter().any(|a| a == "--preview");
     let mut view = None;
@@ -415,7 +426,7 @@ fn main() {
         .init_resource::<Surface>()
         .insert_resource(ClearColor(Color::srgb(0.055, 0.065, 0.07)));
     let plugins = DefaultPlugins.set(AssetPlugin {
-        file_path: format!("{}/assets", env!("CARGO_MANIFEST_DIR")),
+        meta_check: bevy::asset::AssetMetaCheck::Never,
         ..default()
     });
     if headless {
@@ -437,7 +448,8 @@ fn main() {
             ..default()
         }));
     }
-    app.add_systems(Startup, setup)
+    app.add_plugins(client_assets::EmbeddedArtPlugin)
+        .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
@@ -482,14 +494,14 @@ fn setup(
         commands.spawn(Camera2d);
     }
     commands.insert_resource(Art {
-        font: assets.load("font.ttf"),
-        bold_font: assets.load("font-bold.ttf"),
+        font: assets.load(client_assets::path("font.ttf")),
+        bold_font: assets.load(client_assets::path("font-bold.ttf")),
         ranks: Rank::ALL
             .into_iter()
-            .map(|r| assets.load(format!("{}.png", r.asset())))
+            .map(|r| assets.load(client_assets::path(&format!("{}.png", r.asset()))))
             .collect(),
-        board: assets.load("board.png"),
-        cover: assets.load("cover.png"),
+        board: assets.load(client_assets::path("board.png")),
+        cover: assets.load(client_assets::path("cover.png")),
     });
 }
 
@@ -2273,11 +2285,7 @@ mod tests {
     fn flag_capture_reveals_board_and_shows_bold_result_until_ok() {
         let mut fonts = Assets::<Font>::default();
         let bold = fonts.add(
-            Font::try_from_bytes(
-                std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/font-bold.ttf"))
-                    .unwrap(),
-            )
-            .unwrap(),
+            Font::try_from_bytes(include_bytes!("../../assets/font-bold.ttf").to_vec()).unwrap(),
         );
         for you in 0..2 {
             for winner in 0..2 {
