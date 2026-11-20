@@ -13,7 +13,7 @@ python3 tools/generate_shared_key.py
 cargo build --release --bins
 ```
 
-The generator creates `.secrets/multiplayer.key` (32 OS-random bytes, owner-only permissions), refuses to overwrite an existing key, and never prints it. Git ignores `.secrets/` and `target/`. `build.rs` embeds the same key in both binaries; builds fail if it is missing or not exactly 32 bytes. Distribute `target/release/mas-client` to friends and run the matching `target/release/mas-server`; no separate key file is needed at runtime. Keep the local key for matching rebuilds. For builds elsewhere, set `MAS_SHARED_KEY_FILE` to a securely supplied 32-byte file outside source control. CI generates its own disposable test key, not a distribution key.
+The generator creates `.secrets/multiplayer.key` (32 OS-random bytes, owner-only permissions), refuses to overwrite an existing key, and never prints it. Optionally, run `python3 tools/generate_shared_key.py 'your-password'` to derive the 32-byte key as SHA-256 of the password's exact UTF-8 bytes instead. The same password produces the same key. Remove the existing key first when regenerating, then rebuild both binaries. Git ignores `.secrets/` and `target/`. `build.rs` embeds the same key in both binaries; builds fail if it is missing or not exactly 32 bytes. Distribute `target/release/mas-client` to friends and run the matching `target/release/mas-server`; no separate key file is needed at runtime. Keep the local key for matching rebuilds. For builds elsewhere, set `MAS_SHARED_KEY_FILE` to a securely supplied 32-byte file outside source control. CI generates its own disposable test key, not a distribution key.
 
 From this directory, start the server:
 
