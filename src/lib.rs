@@ -591,6 +591,15 @@ pub fn legal_move(board: &[Option<Piece>], p: usize, from: usize, to: usize) -> 
 }
 
 impl View {
+    /// Remaining deployed inventory, using only the public capture history.
+    pub fn remaining(&self, owner: usize, rank: Rank) -> usize {
+        rank.count().saturating_sub(
+            self.captured
+                .iter()
+                .filter(|piece| piece.owner == owner && piece.rank == rank)
+                .count(),
+        )
+    }
     pub fn legal_targets(&self, from: usize) -> Vec<usize> {
         if !matches!(self.phase, Phase::Playing) || self.turn != self.you {
             return vec![];

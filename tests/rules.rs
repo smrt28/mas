@@ -520,3 +520,88 @@ fn ordinary_moves_and_long_scout_moves_share_a_timeline_without_exposing_ranks()
         }
     }
 }
+
+#[test]
+fn public_capture_history_gives_both_armies_remaining_counts() {
+    for (attacker, defender) in [
+        (Rank::General, Rank::Cadet),
+        (Rank::Cadet, Rank::General),
+        (Rank::General, Rank::General),
+        (Rank::Spy, Rank::Marshal),
+        (Rank::Miner, Rank::Mine),
+        (Rank::Cadet, Rank::Flag),
+    ] {
+        let cfg = Config::default();
+        let mut game = Game::new(0, &cfg);
+        game.start(0, &cfg);
+        for owner in 0..2 {
+            game.apply(owner, Action::AutoPlace, 0, &cfg).unwrap();
+            game.apply(owner, Action::Ready, 0, &cfg).unwrap();
+        }
+        for you in 0..2 {
+            let view = game.view(you, "counts", 0);
+            assert!(view.reserve.iter().all(|(_, count)| *count == 0));
+            for owner in 0..2 {
+                assert_eq!(
+                    Rank::ALL
+                        .into_iter()
+                        .map(|rank| view.remaining(owner, rank))
+                        .sum::<usize>(),
+                    40
+                );
+            }
+        }
+        let from = game
+            .board
+            .iter()
+            .position(|piece| {
+                *piece
+                    == Some(Piece {
+                        owner: 0,
+                        rank: attacker,
+                    })
+            })
+            .unwrap();
+        let to = game
+            .board
+            .iter()
+            .position(|piece| {
+                *piece
+                    == Some(Piece {
+                        owner: 1,
+                        rank: defender,
+                    })
+            })
+            .unwrap();
+        game.board[44] = game.board[from].take();
+        game.board[45] = game.board[to].take();
+        game.turn = 0;
+        game.apply(0, Action::Move { from: 44, to: 45 }, 1, &cfg)
+            .unwrap();
+        for you in 0..2 {
+            let view: View =
+                serde_json::from_str(&serde_json::to_string(&game.view(you, "counts", 1)).unwrap())
+                    .unwrap();
+            for owner in 0..2 {
+                for rank in Rank::ALL {
+                    let actual = game
+                        .board
+                        .iter()
+                        .flatten()
+                        .filter(|piece| piece.owner == owner && piece.rank == rank)
+                        .count();
+                    assert_eq!(view.remaining(owner, rank), actual);
+                }
+            }
+            if matches!(view.phase, Phase::Playing) {
+                assert!(
+                    view.board
+                        .iter()
+                        .flatten()
+                        .filter(|piece| piece.owner != you)
+                        .all(|piece| piece.rank.is_none())
+                );
+            }
+        }
+    }
+}

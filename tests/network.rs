@@ -249,6 +249,11 @@ fn tcp_matchmaking_privacy_moves_timeouts_and_disconnects() {
     for v in [&av, &bv] {
         assert_eq!(v.board.len(), CELLS);
         assert_eq!(v.board.iter().flatten().count(), 80);
+        for owner in 0..2 {
+            for rank in Rank::ALL {
+                assert_eq!(v.remaining(owner, rank), rank.count());
+            }
+        }
         assert!(
             v.board
                 .iter()
@@ -291,6 +296,27 @@ fn tcp_matchmaking_privacy_moves_timeouts_and_disconnects() {
                 serde_json::to_value(&second.motion).unwrap()
             );
             assert!(first.board[50].is_none() && second.board[50].is_none());
+            for view in [&first, &second] {
+                for owner in 0..2 {
+                    for rank in Rank::ALL {
+                        assert_eq!(
+                            view.remaining(owner, rank),
+                            if rank == Rank::Marshal {
+                                0
+                            } else {
+                                rank.count()
+                            }
+                        );
+                    }
+                    assert_eq!(
+                        Rank::ALL
+                            .into_iter()
+                            .map(|rank| view.remaining(owner, rank))
+                            .sum::<usize>(),
+                        39
+                    );
+                }
+            }
         } else {
             let first = first.motion.as_ref().unwrap();
             let second = second.motion.as_ref().unwrap();

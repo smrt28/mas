@@ -114,6 +114,8 @@ struct Painted;
 struct Clock;
 #[derive(Component)]
 struct ReserveCount;
+#[derive(Component)]
+struct RemainingCount;
 #[derive(Resource, Default)]
 struct Surface {
     layout: plan::Layout,
@@ -1113,6 +1115,30 @@ fn paint_piece(cmd: &mut Commands, art: &Art, piece: &VisiblePiece, visual: Piec
         ));
     }
 }
+fn count_label(
+    cmd: &mut Commands,
+    art: &Art,
+    rank: Rank,
+    owner: usize,
+    you: usize,
+    count: usize,
+    layout: plan::Layout,
+) -> Entity {
+    let point = layout.world(plan::count_position(rank, owner), you);
+    cmd.spawn((
+        Painted,
+        Text2d::new(format!("{count}×")),
+        TextFont {
+            font: art.font.clone(),
+            font_size: 12. * layout.scale,
+            ..default()
+        },
+        TextColor(Color::BLACK),
+        Anchor::CENTER,
+        Transform::from_xyz(point.x, point.y, 8.),
+    ))
+    .id()
+}
 fn paint(
     mut cmd: Commands,
     mut c: ResMut<Client>,
@@ -1464,6 +1490,8 @@ fn paint(
             },
         );
     }
+    let remaining_counts = matches!(v.phase, Phase::Playing)
+        || matches!(v.phase, Phase::Finished { .. }) && v.ready.iter().all(|ready| *ready);
     for (rank, count) in &v.reserve {
         let card = plan::card(*rank, v.you);
         let deploying = matches!(v.phase, Phase::Placement);
@@ -1496,24 +1524,26 @@ fn paint(
                 stroke,
             );
         }
-        // Both printed strips have clean, blank count areas. Draw every live
-        // reserve value from the server, including the initial inventory, without
-        // painting a flat patch over the restored paper beneath it.
-        let count_position = plan::count_position(*rank, v.you);
-        let point = layout.world(count_position, v.you);
-        cmd.spawn((
-            Painted,
-            ReserveCount,
-            Text2d::new(format!("{count}×")),
-            TextFont {
-                font: art.font.clone(),
-                font_size: 12. * scale,
-                ..default()
-            },
-            TextColor(Color::BLACK),
-            Anchor::CENTER,
-            Transform::from_xyz(point.x, point.y, 8.),
-        ));
+        if !remaining_counts {
+            let entity = count_label(&mut cmd, &art, *rank, v.you, v.you, *count, layout);
+            cmd.entity(entity).insert(ReserveCount);
+        }
+    }
+    if remaining_counts {
+        for owner in 0..2 {
+            for rank in Rank::ALL {
+                let entity = count_label(
+                    &mut cmd,
+                    &art,
+                    rank,
+                    owner,
+                    v.you,
+                    v.remaining(owner, rank),
+                    layout,
+                );
+                cmd.entity(entity).insert(RemainingCount);
+            }
+        }
     }
     // This is the only UI outside the original plan.
     let top = layout.height / 2.;
@@ -2768,6 +2798,117 @@ mod tests {
                         assert_eq!(actions.try_recv().unwrap(), Action::Place { at, rank });
                     } else {
                         assert!(actions.try_recv().is_err());
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn army_counters_reset_after_deployment_and_track_captures_on_both_strips() {
+        for (attacker, defender) in [
+            (Rank::General, Rank::Cadet),
+            (Rank::Cadet, Rank::General),
+            (Rank::General, Rank::General),
+            (Rank::Spy, Rank::Marshal),
+            (Rank::Miner, Rank::Mine),
+            (Rank::Cadet, Rank::Flag),
+        ] {
+            for you in 0..2 {
+                let cfg = Config::default();
+                let mut game = Game::new(0, &cfg);
+                game.start(0, &cfg);
+                for owner in 0..2 {
+                    game.apply(owner, Action::AutoPlace, 0, &cfg).unwrap();
+                }
+                let (mut client, _, _) = fixture();
+                client.view = Some(game.view(you, "counts", 0));
+                let mut app = App::new();
+                app.insert_resource(client)
+                    .init_resource::<Surface>()
+                    .insert_resource(Art {
+                        font: default(),
+                        bold_font: default(),
+                        ranks: vec![Handle::default(); 11],
+                        board: default(),
+                        cover: default(),
+                    })
+                    .add_systems(Update, paint);
+                app.update();
+                let mut reserves = app
+                    .world_mut()
+                    .query_filtered::<&Text2d, With<ReserveCount>>();
+                assert_eq!(reserves.iter(app.world()).count(), 11);
+                assert!(reserves.iter(app.world()).all(|text| text.0 == "0×"));
+                for owner in 0..2 {
+                    game.apply(owner, Action::Ready, 0, &cfg).unwrap();
+                }
+                for captured in [false, true] {
+                    if captured {
+                        let from = game
+                            .board
+                            .iter()
+                            .position(|piece| {
+                                *piece
+                                    == Some(Piece {
+                                        owner: 0,
+                                        rank: attacker,
+                                    })
+                            })
+                            .unwrap();
+                        let to = game
+                            .board
+                            .iter()
+                            .position(|piece| {
+                                *piece
+                                    == Some(Piece {
+                                        owner: 1,
+                                        rank: defender,
+                                    })
+                            })
+                            .unwrap();
+                        game.board[44] = game.board[from].take();
+                        game.board[45] = game.board[to].take();
+                        game.turn = 0;
+                        game.apply(0, Action::Move { from: 44, to: 45 }, 1, &cfg)
+                            .unwrap();
+                    }
+                    for (w, h) in [(600., 881.), (1200., 900.), (400., 1600.)] {
+                        let layout = plan::Layout::new(w, h);
+                        app.world_mut().resource_mut::<Surface>().layout = layout;
+                        {
+                            let mut client = app.world_mut().resource_mut::<Client>();
+                            client.view = Some(game.view(you, "counts", 1));
+                            client.dirty = true;
+                        }
+                        app.update();
+                        assert_eq!(reserves.iter(app.world()).count(), 0);
+                        let mut query = app
+                            .world_mut()
+                            .query_filtered::<(&Text2d, &Transform), With<RemainingCount>>();
+                        let counts: Vec<_> = query.iter(app.world()).collect();
+                        assert_eq!(counts.len(), 22);
+                        for owner in 0..2 {
+                            for rank in Rank::ALL {
+                                let expected = game
+                                    .board
+                                    .iter()
+                                    .flatten()
+                                    .filter(|piece| piece.owner == owner && piece.rank == rank)
+                                    .count();
+                                let position = layout.world(plan::count_position(rank, owner), you);
+                                let (text, _) = counts
+                                    .iter()
+                                    .find(|(_, t)| {
+                                        (t.translation.x - position.x).abs() < 0.001
+                                            && (t.translation.y - position.y).abs() < 0.001
+                                    })
+                                    .unwrap();
+                                assert_eq!(text.0, format!("{expected}×"));
+                                if !captured {
+                                    assert_eq!(expected, rank.count());
+                                }
+                            }
+                        }
                     }
                 }
             }
