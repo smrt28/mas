@@ -636,7 +636,18 @@ fn label(
     ));
 }
 fn border(cmd: &mut Commands, x: f32, y: f32, w: f32, h: f32, z: f32, color: Color) {
-    let stroke = w.min(h) / 25.;
+    border_with_stroke(cmd, x, y, w, h, z, color, w.min(h) / 25.);
+}
+fn border_with_stroke(
+    cmd: &mut Commands,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    z: f32,
+    color: Color,
+    stroke: f32,
+) {
     for (dx, dy, width, height) in [
         (0., h / 2. - stroke / 2., w, stroke),
         (0., -h / 2. + stroke / 2., w, stroke),
@@ -918,7 +929,22 @@ fn paint(
             );
         }
         if deploying && *rank == c.rank && *count > 0 && !v.ready[v.you] {
-            printed_rect(&mut cmd, card, v.you, 2., gold, true, layout);
+            let center = layout.world(card.center(), v.you);
+            let width = card.width / plan::PAGE_WIDTH * layout.board_width;
+            let height = card.height / plan::PAGE_HEIGHT * layout.board_height;
+            let stroke = width * 0.07;
+            // Draw outside the card so the stronger outline cannot cover its
+            // illustration, label or reserve count. Scale with the sheet.
+            border_with_stroke(
+                &mut cmd,
+                center.x,
+                center.y,
+                width + 2. * stroke,
+                height + 2. * stroke,
+                2.,
+                Color::srgb(0.02, 0.18, 0.95),
+                stroke,
+            );
         }
         // Both printed strips have clean, blank count areas. Draw every live
         // reserve value from the server, including the initial inventory, without
@@ -1349,10 +1375,17 @@ mod tests {
                         .iter(app.world())
                         .filter(|(sprite, transform)| {
                             transform.translation.z == 2.
-                                && sprite.color == Color::srgb(0.94, 0.67, 0.32)
+                                && sprite.color == Color::srgb(0.02, 0.18, 0.95)
                         })
                         .collect();
                     assert_eq!(edges.len(), 4);
+                    let stroke = width * 0.07;
+                    for (sprite, _) in &edges {
+                        let size = sprite.custom_size.unwrap();
+                        assert!((size.x.min(size.y) - stroke).abs() < 0.001);
+                    }
+                    let width = width + 2. * stroke;
+                    let height = height + 2. * stroke;
                     let left = edges
                         .iter()
                         .map(|(s, t)| t.translation.x - s.custom_size.unwrap().x / 2.)
