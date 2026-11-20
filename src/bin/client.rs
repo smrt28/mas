@@ -923,10 +923,7 @@ fn paint(
         // Both printed strips have clean, blank count areas. Draw every live
         // reserve value from the server, including the initial inventory, without
         // painting a flat patch over the restored paper beneath it.
-        let count_position = plan::Point {
-            x: card.center().x,
-            y: if v.you == 0 { 1960. } else { 48. },
-        };
+        let count_position = plan::count_position(*rank, v.you);
         let point = layout.world(count_position, v.you);
         cmd.spawn((
             Painted,
@@ -1304,18 +1301,33 @@ mod tests {
                     .init_resource::<ButtonInput<KeyCode>>()
                     .init_resource::<ButtonInput<MouseButton>>()
                     .add_message::<KeyboardInput>()
-                    .add_systems(Update, (fit_surface, input).chain());
+                    .insert_resource(Art {
+                        font: default(),
+                        ranks: vec![Handle::default(); 11],
+                        board: default(),
+                        cover: default(),
+                    })
+                    .add_systems(Update, (fit_surface, input, paint).chain());
                 let window = app.world_mut().spawn(Window::default()).id();
                 app.update();
-                for (w, h, target) in [
-                    (400., 1200., None),
-                    (1600., 500., Some(if you == 0 { 109 } else { 0 })),
-                ] {
+                for (w, h, target, rank) in
+                    [(360., 480.), (600., 881.), (1200., 900.), (400., 1600.)]
+                        .into_iter()
+                        .flat_map(|(w, h)| {
+                            plan::STRIP.into_iter().map(move |rank| (w, h, None, rank))
+                        })
+                        .chain(std::iter::once((
+                            1600.,
+                            500.,
+                            Some(if you == 0 { 109 } else { 0 }),
+                            Rank::Mine,
+                        )))
+                {
                     let layout = plan::Layout::new(w, h);
                     let position = if let Some(at) = target {
                         plan::cell(at).center()
                     } else {
-                        plan::card(Rank::Miner, you).center()
+                        plan::card(rank, you).center()
                     };
                     let point = layout.world(position, you);
                     let mut win = app.world_mut().get_mut::<Window>(window).unwrap();
@@ -1327,15 +1339,52 @@ mod tests {
                         .resource_mut::<ButtonInput<MouseButton>>()
                         .press(MouseButton::Left);
                     app.update();
-                    assert_eq!(app.world().resource::<Client>().rank, Rank::Miner);
+                    assert_eq!(app.world().resource::<Client>().rank, rank);
+                    let area = plan::card(rank, you);
+                    let center = layout.world(area.center(), you);
+                    let width = area.width / plan::PAGE_WIDTH * layout.board_width;
+                    let height = area.height / plan::PAGE_HEIGHT * layout.board_height;
+                    let mut sprites = app.world_mut().query::<(&Sprite, &Transform)>();
+                    let edges: Vec<_> = sprites
+                        .iter(app.world())
+                        .filter(|(sprite, transform)| {
+                            transform.translation.z == 2.
+                                && sprite.color == Color::srgb(0.94, 0.67, 0.32)
+                        })
+                        .collect();
+                    assert_eq!(edges.len(), 4);
+                    let left = edges
+                        .iter()
+                        .map(|(s, t)| t.translation.x - s.custom_size.unwrap().x / 2.)
+                        .fold(f32::INFINITY, f32::min);
+                    let right = edges
+                        .iter()
+                        .map(|(s, t)| t.translation.x + s.custom_size.unwrap().x / 2.)
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    let bottom = edges
+                        .iter()
+                        .map(|(s, t)| t.translation.y - s.custom_size.unwrap().y / 2.)
+                        .fold(f32::INFINITY, f32::min);
+                    let top = edges
+                        .iter()
+                        .map(|(s, t)| t.translation.y + s.custom_size.unwrap().y / 2.)
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    assert!((left - (center.x - width / 2.)).abs() < 0.001);
+                    assert!((right - (center.x + width / 2.)).abs() < 0.001);
+                    assert!((bottom - (center.y - height / 2.)).abs() < 0.001);
+                    assert!((top - (center.y + height / 2.)).abs() < 0.001);
+                    let count = layout.world(plan::count_position(rank, you), you);
+                    let mut counts = app
+                        .world_mut()
+                        .query_filtered::<&Transform, With<ReserveCount>>();
+                    assert!(
+                        counts
+                            .iter(app.world())
+                            .any(|t| (t.translation.x - count.x).abs() < 0.001
+                                && (t.translation.y - count.y).abs() < 0.001)
+                    );
                     if let Some(at) = target {
-                        assert_eq!(
-                            actions.try_recv().unwrap(),
-                            Action::Place {
-                                at,
-                                rank: Rank::Miner
-                            }
-                        );
+                        assert_eq!(actions.try_recv().unwrap(), Action::Place { at, rank });
                     } else {
                         assert!(actions.try_recv().is_err());
                     }
@@ -1387,13 +1436,7 @@ mod tests {
                 let counts: Vec<_> = query.iter(app.world()).collect();
                 assert_eq!(counts.len(), 11);
                 for rank in plan::STRIP {
-                    let p = plan::Layout::default().world(
-                        plan::Point {
-                            x: plan::card(rank, you).center().x,
-                            y: if you == 0 { 1960. } else { 48. },
-                        },
-                        you,
-                    );
+                    let p = plan::Layout::default().world(plan::count_position(rank, you), you);
                     let (text, _, color) = counts
                         .iter()
                         .find(|(_, transform, _)| {

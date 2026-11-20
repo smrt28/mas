@@ -280,3 +280,38 @@ fn board_points_and_piece_strip_scale_by_the_same_factor() {
         }
     }
 }
+
+#[test]
+fn edited_png_slots_have_uniform_centers_and_count_anchors_inside_cards() {
+    // Independent measurements in the 1059×1485 asset, not round trips through
+    // card(): catches accidental return to the old PDF legend coordinates.
+    for you in 0..2 {
+        for (i, rank) in plan::STRIP.into_iter().enumerate() {
+            let area = plan::card(rank, you);
+            let center = area.center();
+            let expected_x = if you == 0 {
+                49. + 96. * i as f32
+            } else {
+                1010. - 96. * i as f32
+            };
+            assert!((center.x / plan::PAGE_WIDTH * 1059. - expected_x).abs() < 0.001);
+            assert!(area.contains(plan::count_position(rank, you)));
+            for (w, h) in [(360., 480.), (600., 881.), (1200., 900.), (400., 1600.)] {
+                let layout = plan::Layout::new(w, h);
+                for p in [
+                    center,
+                    Point {
+                        x: area.left + 1.,
+                        y: area.top + 1.,
+                    },
+                    Point {
+                        x: area.left + area.width - 1.,
+                        y: area.top + area.height - 1.,
+                    },
+                ] {
+                    assert_eq!(layout.pick_rank(layout.world(p, you), you), Some(rank));
+                }
+            }
+        }
+    }
+}

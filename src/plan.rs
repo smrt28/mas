@@ -159,30 +159,30 @@ fn pick_source_cell(p: Point) -> Option<usize> {
     let at = row * COLS + col;
     (at < CELLS && !crate::blocked(at)).then_some(at)
 }
-/// Original red cards below the grid, or original white cards above it when the
-/// sheet is rotated for player two. Their order and spacing come from the PDF.
+/// Card slots measured in the edited PNG (1059×1485). Both printed strips
+/// share equal center spacing and balanced margins. Convert once into the
+/// board coordinate system used by picking, borders and reserve counts.
 pub fn card(rank: Rank, you: usize) -> Rect {
     let i = STRIP.iter().position(|r| *r == rank).unwrap();
-    if you == 0 {
-        let left = [
-            5., 135., 265., 396., 526., 656., 786., 917., 1047., 1177., 1308.,
-        ][i];
-        Rect {
-            left,
-            top: 1812.,
-            width: 114.,
-            height: 176.,
-        }
+    let left = 5. + 96. * i as f32;
+    let (left, top) = if you == 0 {
+        (left, 1344.)
     } else {
-        let left = [
-            1316., 1186., 1056., 925., 795., 665., 535., 405., 274., 145., 14.,
-        ][i];
-        Rect {
-            left,
-            top: 23.,
-            width: 114_f32.min(PAGE_WIDTH - left),
-            height: 174.,
-        }
+        (1059. - left - 88., 16.)
+    };
+    Rect {
+        left: left / 1059. * PAGE_WIDTH,
+        top: top / 1485. * PAGE_HEIGHT,
+        width: 88. / 1059. * PAGE_WIDTH,
+        height: 132. / 1485. * PAGE_HEIGHT,
+    }
+}
+/// Counts occupy the blank area below the label in the viewer's orientation.
+pub fn count_position(rank: Rank, you: usize) -> Point {
+    let area = card(rank, you);
+    Point {
+        x: area.center().x,
+        y: area.top + area.height * if you == 0 { 0.86 } else { 0.14 },
     }
 }
 pub fn pick_rank(p: Point, you: usize) -> Option<Rank> {
