@@ -89,12 +89,13 @@ cargo run --bin mas-client -- --headless --preview --screenshot /tmp/mas-preview
 
 The client embeds the board, cover, all eleven piece images, and both fonts into the executable. It loads these from Bevy's in-memory asset source on every platform. No `assets` directory, configuration file, font installation, or separate key file is needed beside the Windows EXE. `mas-client.exe --licenses` displays the embedded font license. The release build uses the Windows GUI subsystem, so opening the client does not open a console window.
 
-To cross-build **only the client** on Linux, install the Rust target and extract an official [LLVM-MinGW UCRT toolchain](https://github.com/mstorsjo/llvm-mingw/releases) for Linux:
+To cross-build **only the client** on x86_64 Linux:
 
 ```sh
-rustup target add x86_64-pc-windows-gnullvm
-LLVM_MINGW_ROOT=/path/to/llvm-mingw tools/build_windows_client.sh
+./tools/build_windows_client.sh
 ```
+
+On first use, the script downloads a pinned official [LLVM-MinGW UCRT toolchain](https://github.com/mstorsjo/llvm-mingw/releases), verifies its SHA-256, and caches it under the ignored `target/toolchains/` directory. It also installs the Rust Windows target if missing. Subsequent builds reuse the cached tools. No system packages or shell environment setup are needed. To use an existing toolchain instead, set `LLVM_MINGW_ROOT=/path/to/llvm-mingw`; a compiler already on `PATH` is also supported.
 
 Use the same `.secrets/multiplayer.key` (or `MAS_SHARED_KEY_FILE`) as the server build. The script builds with static runtime libraries and strips the distribution copy. Give friends only **`target/windows/mas-client.exe`**, intended for 64-bit Windows 10/11 with a compatible graphics driver. No MinGW or Visual C++ runtime installation is required; Windows system libraries and GPU drivers are supplied by Windows/the graphics vendor.
 
