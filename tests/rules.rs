@@ -261,6 +261,19 @@ fn any_mobile_piece_captures_flag() {
                 ..
             }
         ));
+        for player in 0..2 {
+            let view = g.view(player, "flag capture", 1);
+            // Assert the serialized reply reveals exactly the authoritative ranks.
+            let view: View = serde_json::from_str(&serde_json::to_string(&view).unwrap()).unwrap();
+            for (actual, visible) in g.board.iter().zip(&view.board) {
+                assert_eq!(
+                    actual.map(|piece| (piece.owner, piece.rank)),
+                    visible
+                        .as_ref()
+                        .map(|piece| (piece.owner, piece.rank.unwrap()))
+                );
+            }
+        }
         assert!(
             g.apply(1, Action::Move { from: 9, to: 8 }, 2, &cfg)
                 .is_err()

@@ -30,7 +30,7 @@ The spy/marshal exception is symmetric: the Czech text says the spy can be captu
 
 A mine stays in place after defeating an attacker. A miner defeats the mine and occupies its square. Any moving piece captures a flag. Neither side can enter either of the two central areas without a grid.
 
-The player whose flag is captured loses. The text also allows a draw when neither side can hope to capture a flag, and specifically describes losing all remaining mobile pieces as a way to obtain a stalemate draw.
+The player whose flag is captured loses. At the end of a game, both armies’ remaining pieces are revealed. After flag capture, the winner sees “You win!” and the loser sees “You lose!” in bold in the top bar; OK returns to the main screen. The text also allows a draw when neither side can hope to capture a flag, and specifically describes losing all remaining mobile pieces as a way to obtain a stalemate draw.
 
 ## Decisions for the digital edition
 
@@ -43,7 +43,7 @@ The board geometry follows the complete plan; the remaining decisions specify th
 5. **Move clock:** time expiry passes the turn. A configurable number of consecutive personal misses loses the game (default three). A valid move clears that commander's miss counter. Invalid actions do not extend time. Each next turn gets a fresh full allowance.
 6. **Draw adjudication:** no legal moves for either commander ends the match as a draw, even if caused by a blocked army rather than the complete loss of mobile pieces. A configurable number of moves without any piece being captured also draws (default 200). This provides a finite resolution to repetition and inaccessible-flag positions; it does not attempt a strategic proof of whether a flag can ever be captured.
 7. **Knowledge:** only the attacker gets the defending rank in a private field report. Captured ranks are recorded for both players. The rank of a surviving attacker is not revealed. No surviving enemy ranks are exposed at match end. Scouts can naturally be inferred from long moves.
-8. **No reconnection:** disconnects and resignations lose immediately, except after the result is already final. A third connection cannot replace a player. The last departure removes the room; restarting the server removes all rooms.
+8. **No reconnection:** a disconnect interrupts the game without a winner; the other player sees “Broken pike” and returns to the main screen after OK. Resignations lose immediately. A disconnect does not change an already final result. A third connection cannot replace a player. The last departure removes the room; restarting the server removes all rooms.
 9. **No redeployment:** locked deployment cannot be edited. Before automatic locking, right-clicking a placed piece returns it to its printed bottom-strip reserve. At timeout, automatic filling preserves pieces already placed. Placement does not reveal enemy occupancy or readiness details beyond the shared ready indicators.
 
 The rule engine, coordinator and protocol tests cover these decisions. The supplied PDF remains the source artwork; extraction adds no generated pieces. The interface uses English instructions and the original Czech rank names.

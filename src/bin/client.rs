@@ -71,6 +71,7 @@ struct Offscreen(Handle<Image>);
 #[derive(Resource)]
 struct Art {
     font: Handle<Font>,
+    bold_font: Handle<Font>,
     ranks: Vec<Handle<Image>>,
     board: Handle<Image>,
     cover: Handle<Image>,
@@ -99,6 +100,7 @@ struct Client {
     ready_sent: bool,
     preview: bool,
     session: u64,
+    broken: bool,
 }
 impl Client {
     fn send(&mut self, a: Action) -> bool {
@@ -130,7 +132,23 @@ impl Client {
         self.view = None;
         self.selected = None;
         self.ready_sent = false;
+        self.broken = false;
+        self.error.clear();
         self.connecting = false;
+        self.dirty = true;
+    }
+    fn break_connection(&mut self) {
+        // Retain the board until the dialog is acknowledged. Invalidate queued
+        // network events so they cannot replace or dismiss the interruption.
+        self.session += 1;
+        if let Some(socket) = self.socket.take() {
+            let _ = socket.shutdown(Shutdown::Both);
+        }
+        self.tx = None;
+        self.connecting = false;
+        self.selected = None;
+        self.error.clear();
+        self.broken = true;
         self.dirty = true;
     }
     fn connect(&mut self) {
@@ -258,6 +276,7 @@ fn main() {
         ready_sent: false,
         preview,
         session: 0,
+        broken: false,
     };
     if autojoin {
         client.connect();
@@ -326,6 +345,7 @@ fn setup(
     }
     commands.insert_resource(Art {
         font: assets.load("font.ttf"),
+        bold_font: assets.load("font-bold.ttf"),
         ranks: Rank::ALL
             .into_iter()
             .map(|r| assets.load(format!("{}.png", r.asset())))
@@ -399,6 +419,11 @@ fn receive(mut c: ResMut<Client>) {
                 c.send(Action::Join { game: name });
             }
             Event::Reply(Reply::State { view }) => {
+                if matches!(&view.phase, Phase::Finished { reason, .. } if reason == "Opponent disconnected")
+                {
+                    c.break_connection();
+                    continue;
+                }
                 let lock = matches!(view.phase, Phase::Placement)
                     && !view.ready[view.you]
                     && view.reserve.iter().all(|(_, n)| *n == 0)
@@ -435,6 +460,13 @@ fn receive(mut c: ResMut<Client>) {
                 c.dirty = true;
             }
             Event::Failed(message) => {
+                if c.view
+                    .as_ref()
+                    .is_some_and(|v| !matches!(v.phase, Phase::Finished { .. }))
+                {
+                    c.break_connection();
+                    continue;
+                }
                 c.tx = None;
                 c.socket = None;
                 c.connecting = false;
@@ -452,6 +484,33 @@ fn input(
     window: Option<Single<&Window>>,
     surface: Res<Surface>,
 ) {
+    if c.broken {
+        text.clear();
+        let button = broken_ok(surface.layout);
+        let clicked_ok = mouse.just_pressed(MouseButton::Left)
+            && window
+                .as_ref()
+                .and_then(|w| w.cursor_position())
+                .is_some_and(|cursor| {
+                    let p = surface.layout.cursor(cursor.x, cursor.y);
+                    button.contains(p)
+                });
+        if clicked_ok
+            || keys.just_pressed(KeyCode::Enter)
+            || keys.just_pressed(KeyCode::Space)
+            || keys.just_pressed(KeyCode::Escape)
+        {
+            c.leave();
+        }
+        return;
+    }
+    if c.view.as_ref().and_then(flag_result).is_some()
+        && (keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space))
+    {
+        c.leave();
+        text.clear();
+        return;
+    }
     if keys.just_pressed(KeyCode::Escape) {
         c.leave();
     }
@@ -525,6 +584,12 @@ fn input(
     }
     let v = c.view.as_ref().unwrap().clone();
     let point = plan::Point { x: pos.x, y: pos.y };
+    if flag_result(&v).is_some() {
+        if clicked && result_ok(surface.layout).contains(point) {
+            c.leave();
+        }
+        return;
+    }
     if surface.layout.in_bar(point) {
         if clicked && (matches!(v.phase, Phase::Finished { .. }) || c.tx.is_none() && !c.preview) {
             c.leave();
@@ -805,6 +870,9 @@ fn paint(
                 gold,
             );
         }
+        if c.broken {
+            broken_dialog(&mut cmd, &art, surface.layout);
+        }
         return;
     };
     let layout = surface.layout;
@@ -976,6 +1044,37 @@ fn paint(
         5.,
         Color::srgb(0.07, 0.085, 0.085),
     );
+    if let Some(result) = flag_result(v) {
+        let button = result_ok(layout);
+        let center = button.center();
+        rect(
+            &mut cmd,
+            center.x,
+            center.y,
+            button.width,
+            button.height,
+            6.,
+            Color::srgb(0.04, 0.28, 0.78),
+        );
+        for (text, x, anchor) in [
+            (result, -layout.width / 2. + 12., Anchor::CENTER_LEFT),
+            ("OK", center.x, Anchor::CENTER),
+        ] {
+            cmd.spawn((
+                Painted,
+                Text2d::new(text),
+                TextFont {
+                    font: art.bold_font.clone(),
+                    font_size: 22.,
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+                anchor,
+                Transform::from_xyz(x, center.y, 8.),
+            ));
+        }
+        return;
+    }
     let status = if c.tx.is_none() && !c.preview {
         "Disconnected · Click here to return".into()
     } else {
@@ -1079,14 +1178,94 @@ fn paint(
         Anchor::CENTER_RIGHT,
         Transform::from_xyz(layout.width / 2. - 12., top - 26., 8.),
     ));
+    if c.broken {
+        broken_dialog(&mut cmd, &art, layout);
+    }
+}
+fn flag_result(view: &View) -> Option<&'static str> {
+    match &view.phase {
+        Phase::Finished {
+            winner: Some(winner),
+            reason,
+        } if reason == "Enemy flag captured" => Some(if *winner == view.you {
+            "You win!"
+        } else {
+            "You lose!"
+        }),
+        _ => None,
+    }
+}
+fn result_ok(layout: plan::Layout) -> plan::Rect {
+    plan::Rect {
+        left: layout.width / 2. - 76.,
+        top: layout.height / 2. - 36.,
+        width: 64.,
+        height: 32.,
+    }
+}
+fn broken_ok(layout: plan::Layout) -> plan::Rect {
+    let width = 100_f32.min(layout.width - 32.);
+    // World coordinates, shared by rendering and mouse picking.
+    plan::Rect {
+        left: -width / 2.,
+        top: -48.,
+        width,
+        height: 36.,
+    }
+}
+fn broken_dialog(cmd: &mut Commands, art: &Art, layout: plan::Layout) {
+    rect(
+        cmd,
+        0.,
+        0.,
+        layout.width,
+        layout.height,
+        20.,
+        Color::srgba(0., 0., 0., 0.75),
+    );
+    rect(
+        cmd,
+        0.,
+        0.,
+        300_f32.min(layout.width - 24.),
+        144.,
+        21.,
+        Color::srgb(0.10, 0.13, 0.16),
+    );
+    let button = broken_ok(layout);
+    let center = button.center();
+    rect(
+        cmd,
+        center.x,
+        center.y,
+        button.width,
+        button.height,
+        22.,
+        Color::srgb(0.04, 0.28, 0.78),
+    );
+    for (text, y, size) in [("Broken pike", 28., 26.), ("OK", center.y, 20.)] {
+        cmd.spawn((
+            Painted,
+            Text2d::new(text),
+            TextFont {
+                font: art.font.clone(),
+                font_size: size,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            Anchor::CENTER,
+            Transform::from_xyz(0., y, 23.),
+        ));
+    }
 }
 fn clock_text(c: Res<Client>, mut texts: Query<&mut Text2d, With<Clock>>) {
     if let Some(v) = &c.view {
         let remaining = v
             .remaining_ms
             .saturating_sub(c.received.elapsed().as_millis() as u64);
-        let running = matches!(v.phase, Phase::Placement)
-            || matches!(v.phase, Phase::Playing) && v.turn == v.you;
+        let running = !c.broken
+            && (matches!(v.phase, Phase::Placement)
+                || matches!(v.phase, Phase::Playing) && v.turn == v.you);
         for mut text in &mut texts {
             text.0 = if running {
                 format!(
@@ -1151,9 +1330,246 @@ mod tests {
             ready_sent: false,
             preview: false,
             session: 0,
+            broken: false,
         };
         (client, events_tx, actions_rx)
     }
+    #[test]
+    fn flag_capture_reveals_board_and_shows_bold_result_until_ok() {
+        let mut fonts = Assets::<Font>::default();
+        let bold = fonts.add(
+            Font::try_from_bytes(
+                std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/font-bold.ttf"))
+                    .unwrap(),
+            )
+            .unwrap(),
+        );
+        for you in 0..2 {
+            for winner in 0..2 {
+                for (w, h) in [(360., 480.), (600., 881.), (1200., 900.), (400., 1600.)] {
+                    for keyboard_ok in [false, true] {
+                        let cfg = Config::default();
+                        let mut game = Game::new(0, &cfg);
+                        game.phase = Phase::Playing;
+                        game.turn = winner;
+                        game.deadline = 5000;
+                        game.board[44] = Some(Piece {
+                            owner: winner,
+                            rank: Rank::Miner,
+                        });
+                        game.board[45] = Some(Piece {
+                            owner: 1 - winner,
+                            rank: Rank::Flag,
+                        });
+                        game.board[90] = Some(Piece {
+                            owner: 1 - winner,
+                            rank: Rank::Spy,
+                        });
+                        let (mut client, events, actions) = fixture();
+                        client.view = Some(game.view(you, "test", 0));
+                        let layout = plan::Layout::new(w, h);
+                        let mut app = App::new();
+                        app.insert_resource(client)
+                            .insert_resource(Surface {
+                                layout,
+                                playing: Some(true),
+                            })
+                            .init_resource::<ButtonInput<KeyCode>>()
+                            .init_resource::<ButtonInput<MouseButton>>()
+                            .add_message::<KeyboardInput>()
+                            .insert_resource(Art {
+                                font: default(),
+                                bold_font: bold.clone(),
+                                ranks: vec![Handle::default(); 11],
+                                board: default(),
+                                cover: default(),
+                            })
+                            .add_systems(Update, (receive, input, paint).chain());
+                        let window = app
+                            .world_mut()
+                            .spawn(Window {
+                                resolution: (w as u32, h as u32).into(),
+                                ..default()
+                            })
+                            .id();
+                        app.update();
+                        game.apply(winner, Action::Move { from: 44, to: 45 }, 1, &cfg)
+                            .unwrap();
+                        events
+                            .send((
+                                0,
+                                Event::Reply(Reply::State {
+                                    view: game.view(you, "test", 1),
+                                }),
+                            ))
+                            .unwrap();
+                        app.update();
+                        let expected = if you == winner {
+                            "You win!"
+                        } else {
+                            "You lose!"
+                        };
+                        let mut texts = app.world_mut().query::<(&Text2d, &TextFont, &Transform)>();
+                        for text in [expected, "OK"] {
+                            let (_, font, transform) = texts
+                                .iter(app.world())
+                                .find(|(t, _, _)| t.0 == text)
+                                .unwrap();
+                            assert_eq!(font.font, bold);
+                            assert!(layout.in_bar(plan::Point {
+                                x: transform.translation.x,
+                                y: transform.translation.y
+                            }));
+                        }
+                        assert!(!texts.iter(app.world()).any(|(t, _, _)| t.0 == "?"));
+                        assert!(
+                            app.world()
+                                .resource::<Client>()
+                                .view
+                                .as_ref()
+                                .unwrap()
+                                .board
+                                .iter()
+                                .flatten()
+                                .all(|piece| piece.rank.is_some())
+                        );
+                        // Clicking the result text leaves the revealed board available.
+                        app.world_mut()
+                            .get_mut::<Window>(window)
+                            .unwrap()
+                            .set_cursor_position(Some(Vec2::new(20., 20.)));
+                        app.world_mut()
+                            .resource_mut::<ButtonInput<MouseButton>>()
+                            .press(MouseButton::Left);
+                        app.update();
+                        assert!(app.world().resource::<Client>().view.is_some());
+                        assert!(actions.try_recv().is_err());
+                        app.insert_resource(ButtonInput::<MouseButton>::default());
+                        if keyboard_ok {
+                            app.world_mut()
+                                .resource_mut::<ButtonInput<KeyCode>>()
+                                .press(KeyCode::Enter);
+                        } else {
+                            let p = result_ok(layout).center();
+                            app.world_mut()
+                                .get_mut::<Window>(window)
+                                .unwrap()
+                                .set_cursor_position(Some(Vec2::new(p.x + w / 2., h / 2. - p.y)));
+                            app.world_mut()
+                                .resource_mut::<ButtonInput<MouseButton>>()
+                                .press(MouseButton::Left);
+                        }
+                        app.update();
+                        assert!(app.world().resource::<Client>().view.is_none());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn disconnect_dialog_blocks_board_input_and_ok_returns_to_main_screen() {
+        for phase in [Phase::Waiting, Phase::Placement, Phase::Playing] {
+            for transport_failed in [false, true] {
+                for keyboard_ok in [false, true] {
+                    let (mut client, events, actions) = fixture();
+                    let mut game = Game::new(0, &Config::default());
+                    game.phase = phase.clone();
+                    client.view = Some(game.view(0, "test", 0));
+                    let mut app = App::new();
+                    app.insert_resource(client)
+                        .init_resource::<Surface>()
+                        .init_resource::<Assets<Image>>()
+                        .init_resource::<ButtonInput<KeyCode>>()
+                        .init_resource::<ButtonInput<MouseButton>>()
+                        .add_message::<KeyboardInput>()
+                        .insert_resource(Art {
+                            font: default(),
+                            bold_font: default(),
+                            ranks: vec![Handle::default(); 11],
+                            board: default(),
+                            cover: default(),
+                        })
+                        .add_systems(Update, (receive, fit_surface, input, paint).chain());
+                    let window = app.world_mut().spawn(Window::default()).id();
+                    app.update();
+                    let event = if transport_failed {
+                        Event::Failed("connection closed".into())
+                    } else {
+                        game.phase = Phase::Finished {
+                            winner: None,
+                            reason: "Opponent disconnected".into(),
+                        };
+                        Event::Reply(Reply::State {
+                            view: game.view(0, "test", 0),
+                        })
+                    };
+                    events.send((0, event)).unwrap();
+                    // A queued old state must not undo the dialog.
+                    events
+                        .send((
+                            0,
+                            Event::Reply(Reply::State {
+                                view: game.view(0, "test", 0),
+                            }),
+                        ))
+                        .unwrap();
+                    app.update();
+                    assert!(app.world().resource::<Client>().broken);
+                    assert!(app.world().resource::<Client>().view.is_some());
+                    let mut labels = app.world_mut().query::<&Text2d>();
+                    assert!(labels.iter(app.world()).any(|text| text.0 == "Broken pike"));
+                    assert!(labels.iter(app.world()).any(|text| text.0 == "OK"));
+                    let layout = app.world().resource::<Surface>().layout;
+                    let board_point = layout.world(plan::card(Rank::Miner, 0).center(), 0);
+                    app.world_mut()
+                        .get_mut::<Window>(window)
+                        .unwrap()
+                        .set_cursor_position(Some(Vec2::new(
+                            board_point.x + layout.width / 2.,
+                            layout.height / 2. - board_point.y,
+                        )));
+                    app.world_mut()
+                        .resource_mut::<ButtonInput<MouseButton>>()
+                        .press(MouseButton::Left);
+                    app.update();
+                    assert!(app.world().resource::<Client>().broken);
+                    assert_eq!(app.world().resource::<Client>().rank, Rank::Flag);
+                    assert!(actions.try_recv().is_err());
+                    app.insert_resource(ButtonInput::<MouseButton>::default());
+                    if keyboard_ok {
+                        app.world_mut()
+                            .resource_mut::<ButtonInput<KeyCode>>()
+                            .press(KeyCode::Enter);
+                    } else {
+                        let p = broken_ok(layout).center();
+                        app.world_mut()
+                            .get_mut::<Window>(window)
+                            .unwrap()
+                            .set_cursor_position(Some(Vec2::new(
+                                p.x + layout.width / 2.,
+                                layout.height / 2. - p.y,
+                            )));
+                        app.world_mut()
+                            .resource_mut::<ButtonInput<MouseButton>>()
+                            .press(MouseButton::Left);
+                    }
+                    app.update();
+                    let client = app.world().resource::<Client>();
+                    assert!(!client.broken);
+                    assert!(client.view.is_none());
+                    assert!(client.tx.is_none());
+                    assert!(client.error.is_empty());
+                    app.insert_resource(ButtonInput::<KeyCode>::default());
+                    app.insert_resource(ButtonInput::<MouseButton>::default());
+                    app.update();
+                    assert_eq!(app.world().resource::<Surface>().playing, Some(false));
+                    assert!(!labels.iter(app.world()).any(|text| text.0 == "Broken pike"));
+                }
+            }
+        }
+    }
+
     #[test]
     fn completing_deployment_sends_ready_once_without_needing_a_ready_button() {
         let cfg = Config::default();
@@ -1274,6 +1690,7 @@ mod tests {
                         })
                         .insert_resource(Art {
                             font: default(),
+                            bold_font: default(),
                             ranks: vec![Handle::default(); 11],
                             board: default(),
                             cover: default(),
@@ -1329,6 +1746,7 @@ mod tests {
                     .add_message::<KeyboardInput>()
                     .insert_resource(Art {
                         font: default(),
+                        bold_font: default(),
                         ranks: vec![Handle::default(); 11],
                         board: default(),
                         cover: default(),
@@ -1438,6 +1856,7 @@ mod tests {
                 .init_resource::<Surface>()
                 .insert_resource(Art {
                     font: default(),
+                    bold_font: default(),
                     ranks: vec![Handle::default(); 11],
                     board: default(),
                     cover: default(),

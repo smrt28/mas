@@ -442,7 +442,13 @@ impl Game {
                         } else {
                             Some(VisiblePiece {
                                 owner: v.owner,
-                                rank: if v.owner == p { Some(v.rank) } else { None },
+                                rank: if v.owner == p
+                                    || matches!(self.phase, Phase::Finished { .. })
+                                {
+                                    Some(v.rank)
+                                } else {
+                                    None
+                                },
                             })
                         }
                     })

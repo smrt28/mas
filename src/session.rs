@@ -65,7 +65,7 @@ impl Sessions {
             if room.seats.iter().all(Option::is_none) {
                 self.rooms.remove(&name);
             } else if !matches!(room.game.phase, Phase::Finished { .. }) {
-                room.game.finish(Some(1 - p), "Opponent disconnected");
+                room.game.finish(None, "Opponent disconnected");
             }
         }
     }

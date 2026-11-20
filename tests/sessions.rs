@@ -19,7 +19,7 @@ fn named_matchmaking_and_third_player_rejection() {
     assert_eq!(s.view(30, 100).unwrap().phase, Phase::Waiting);
 }
 #[test]
-fn disconnect_wins_and_last_departure_frees_name() {
+fn disconnect_breaks_game_and_last_departure_frees_name() {
     let mut s = Sessions::default();
     let cfg = Config::default();
     join(&mut s, 0, "x", 0, &cfg).unwrap();
@@ -28,9 +28,9 @@ fn disconnect_wins_and_last_departure_frees_name() {
     assert!(matches!(
         s.view(1, 0).unwrap().phase,
         Phase::Finished {
-            winner: Some(1),
-            ..
-        }
+            winner: None,
+            ref reason
+        } if reason == "Opponent disconnected"
     ));
     assert!(join(&mut s, 2, "x", 0, &cfg).is_err());
     s.disconnect(1);
@@ -157,7 +157,7 @@ fn complete_matches_with_serialized_commands_and_private_views() {
                         .iter()
                         .flatten()
                         .filter(|p| p.owner != player as usize)
-                        .all(|p| p.rank.is_none())
+                        .all(|p| p.rank.is_some() == matches!(view.phase, Phase::Finished { .. }))
                 );
                 let mut bytes = vec![];
                 net::write_frame(&mut bytes, &Reply::State { view }).unwrap();

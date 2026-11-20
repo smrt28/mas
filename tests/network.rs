@@ -156,9 +156,9 @@ fn tcp_matchmaking_privacy_moves_timeouts_and_disconnects() {
     assert!(matches!(
         end.phase,
         Phase::Finished {
-            winner: Some(0),
-            ..
-        }
+            winner: None,
+            ref reason
+        } if reason == "Opponent disconnected"
     ));
     // Setup deadline also fires without clients sending Ready.
     let mut c = Player::new(port);
