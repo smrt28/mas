@@ -51,3 +51,20 @@ Validation: `cargo test --offline` passes all 50 tests; the grid check still rep
 screenshot was attempted, but this environment has no GPU adapter (`/dev/dri` is
 absent). The edited PNG was visually inspected; client overlay validation uses
 the actual spawned sprite and text transforms without a GPU.
+
+## White KAPRAL orientation correction
+
+The white KAPRAL illustration on the sixth top card was upright in the PNG,
+which made it upside down when the sheet was rotated for the white commander.
+The 52×62-pixel image patch at (503, 78) is now rotated exactly 180 degrees.
+Its label, count area, card edges, grid and every pixel outside that patch are
+unchanged. The patch uses the original pixels without resampling or redrawing.
+The restored PDF has been re-exported from the corrected PNG.
+
+The built-in imagegen tool provided an orientation-edit reference; the final
+image was composited using the losslessly rotated original patch to preserve
+all printed details and the full sheet's exact geometry.
+
+Orientation-edit prompt:
+
+> Use case: precise-object-edit. Edit target: the attached original 1059 by 1485 pixel game board. Fix ONLY the black KAPRAL corporal illustration on the SIXTH cream/white card from the LEFT in the TOP strip (the card centered at x=530, label KAPRAL at y=58, icon around x=511..550,y=82..133). Its hat/head illustration currently points upright, unlike the ten other white illustrations, which all point upside down. Rotate ONLY that existing white KAPRAL illustration by exactly 180 degrees in place, about its own center. Its moustache/chin must be at the TOP of the corrected icon and its tall black hat at the BOTTOM. Preserve the SAME original printed black drawing, silhouette, size, details, proportions and ink color; do not redraw, mirror, replace or reinterpret it. Preserve/restore the surrounding cream paper texture seamlessly. DO NOT rotate, move or edit its label: the upside-down KAPRAL label must remain exactly as it is, above the icon. Keep that card's cream background and shape and all count space. Keep the red KAPRAL at the bottom unchanged. Every other part of the full board must remain exactly unchanged: all other icons, text, parchment, map, grid, flags, red and white card positions, margins and colors. Full original page framing at original 1059x1485 dimensions, opaque.
