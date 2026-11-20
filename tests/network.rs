@@ -3,7 +3,6 @@
 use marsal_a_spion::{net, *};
 use std::{
     fs,
-    io::BufReader,
     net::{TcpListener, TcpStream},
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -23,25 +22,32 @@ impl Drop for Server {
 }
 struct Player {
     stream: TcpStream,
-    reader: BufReader<TcpStream>,
+    outgoing: net::SendState,
+    incoming: net::ReceiveState,
 }
 impl Player {
     fn new(port: u16) -> Self {
-        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let (outgoing, incoming) = net::client_handshake(&mut stream).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         Self {
-            reader: BufReader::new(stream.try_clone().unwrap()),
             stream,
+            outgoing,
+            incoming,
         }
     }
     fn send(&mut self, a: Action) {
-        net::write_frame(&mut self.stream, &a).unwrap();
+        self.outgoing.send(&mut self.stream, &a).unwrap();
     }
     fn reply(&mut self) -> Reply {
-        let line = net::read_frame(&mut self.reader, net::MAX_FRAME).unwrap();
-        serde_json::from_str(&line).unwrap()
+        self.incoming
+            .receive(&mut self.stream, net::MAX_FRAME)
+            .unwrap()
     }
     fn until(&mut self, predicate: impl Fn(&View) -> bool) -> View {
         let deadline = Instant::now() + Duration::from_secs(8);
@@ -60,6 +66,111 @@ impl Player {
     fn join(&mut self, name: &str) {
         self.send(Action::Join { game: name.into() });
     }
+}
+fn raw_connection(port: u16) -> (TcpStream, [u8; 12]) {
+    use std::io::Read;
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut challenge = [0; 12];
+    stream.read_exact(&mut challenge).unwrap();
+    assert_eq!(&challenge[..4], b"MAS\x01");
+    (stream, challenge)
+}
+fn assert_closed(mut stream: TcpStream) {
+    use std::io::{ErrorKind, Read};
+    let mut byte = [0];
+    match stream.read(&mut byte) {
+        Ok(0) => {}
+        Err(e)
+            if matches!(
+                e.kind(),
+                ErrorKind::ConnectionReset
+                    | ErrorKind::UnexpectedEof
+                    | ErrorKind::ConnectionAborted
+            ) => {}
+        _ => panic!("Rejected connection must close without sending game data"),
+    }
+}
+fn proof(challenge: &[u8; 12], key: &[u8]) -> Vec<u8> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut bytes = vec![];
+    bytes.extend_from_slice(&1_u16.to_be_bytes());
+    bytes.extend_from_slice(&challenge[4..]);
+    bytes.push(1); // client to server
+    bytes.extend_from_slice(&1_u64.to_be_bytes());
+    bytes.push(1); // proof, with empty payload
+    bytes.extend_from_slice(&0_u32.to_be_bytes());
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
+    mac.update(b"MAS-HMAC\0");
+    mac.update(&bytes);
+    bytes.extend_from_slice(&mac.finalize().into_bytes());
+    bytes
+}
+fn check_rejected_connections(port: u16) {
+    use std::io::{Read, Write};
+    // No secret material is printed. This is the same generated build input as
+    // the distributed client/server, not a fixed development bypass key.
+    let key = include_bytes!(concat!(env!("OUT_DIR"), "/shared-key.bin"));
+    let (mut stream, challenge) = raw_connection(port);
+    stream.write_all(&proof(&challenge, &[0; 32])).unwrap();
+    assert_closed(stream);
+    let (mut stream, _) = raw_connection(port);
+    // Rejection may close the socket before the legacy writer finishes.
+    let _ = net::write_frame(
+        &mut stream,
+        &Action::Join {
+            game: "unauthenticated".into(),
+        },
+    );
+    assert_closed(stream);
+    // An idle peer receives no game data and is closed at the admission deadline.
+    let (stream, _) = raw_connection(port);
+    let started = Instant::now();
+    assert_closed(stream);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    // Record a valid proof, authenticate it, then replay it on a new connection.
+    let (mut stream, first_challenge) = raw_connection(port);
+    let recorded_proof = proof(&first_challenge, key);
+    stream.write_all(&recorded_proof).unwrap();
+    let mut ack = [0; 56];
+    stream.read_exact(&mut ack).unwrap();
+    stream.write_all(&recorded_proof).unwrap(); // duplicate sequence 1
+    assert_closed(stream);
+    let (mut stream, next_challenge) = raw_connection(port);
+    assert_ne!(first_challenge, next_challenge);
+    stream.write_all(&recorded_proof).unwrap();
+    assert_closed(stream);
+    // Tampering and duplicate application frames after a valid handshake.
+    let mut player = Player::new(port);
+    let mut captured = vec![];
+    player
+        .outgoing
+        .send(&mut captured, &Action::ListGames)
+        .unwrap();
+    let mut tampered = captured.clone();
+    tampered[24] ^= 1;
+    player.stream.write_all(&tampered).unwrap();
+    assert_closed(player.stream);
+    let mut player = Player::new(port);
+    let mut captured = vec![];
+    player
+        .outgoing
+        .send(&mut captured, &Action::ListGames)
+        .unwrap();
+    player.stream.write_all(&captured).unwrap();
+    assert!(matches!(player.reply(), Reply::Games { .. }));
+    player.stream.write_all(&captured).unwrap();
+    assert_closed(player.stream);
+    // Reconnection resets counters but never accepts the previous session's bytes.
+    let mut player = Player::new(port);
+    player.stream.write_all(&captured).unwrap();
+    assert_closed(player.stream);
+    let mut browser = Player::new(port);
+    browser.send(Action::ListGames);
+    assert!(matches!(browser.reply(), Reply::Games { games } if games.is_empty()));
 }
 #[test]
 fn tcp_matchmaking_privacy_moves_timeouts_and_disconnects() {
@@ -88,13 +199,30 @@ fn tcp_matchmaking_privacy_moves_timeouts_and_disconnects() {
         assert!(Instant::now() < deadline, "Server did not start");
         thread::sleep(Duration::from_millis(20));
     }
+    check_rejected_connections(port);
+    let mut browser = Player::new(port);
+    browser.send(Action::ListGames);
+    assert!(matches!(browser.reply(), Reply::Games { games } if games.is_empty()));
     let mut a = Player::new(port);
     a.join("test match");
     a.until(|v| matches!(v.phase, Phase::Waiting));
+    browser.send(Action::ListGames);
+    let Reply::Games { games } = browser.reply() else {
+        panic!("Expected lobby list")
+    };
+    assert_eq!(games, vec!["test match"]);
     let mut b = Player::new(port);
-    b.join("test match");
+    b.send(Action::JoinWaiting {
+        game: games[0].clone(),
+    });
     a.until(|v| matches!(v.phase, Phase::Placement));
     b.until(|v| matches!(v.phase, Phase::Placement));
+    browser.send(Action::ListGames);
+    assert!(matches!(browser.reply(), Reply::Games { games } if games.is_empty()));
+    browser.send(Action::JoinWaiting {
+        game: "test match".into(),
+    });
+    assert!(matches!(browser.reply(), Reply::Error { .. }));
     let mut third = Player::new(port);
     third.join("test match");
     assert!(matches!(third.reply(), Reply::Error { .. }));

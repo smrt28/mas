@@ -1,4 +1,5 @@
-//! Bounded newline-delimited JSON transport, shared by server and native client.
+//! Authenticated TCP transport plus bounded JSON helpers for offline serialization tests.
+//! Network connections must use the handshake and SendState/ReceiveState APIs.
 use std::io::{self, BufRead, Read, Write};
 
 pub const MAX_FRAME: u64 = 65536;
@@ -24,3 +25,8 @@ pub fn write_frame(writer: &mut impl Write, value: &impl serde::Serialize) -> io
     writer.write_all(b"\n")?;
     writer.flush()
 }
+
+mod authenticated;
+pub use authenticated::{
+    AUTH_TIMEOUT, ReceiveState, SendState, client_handshake, server_handshake,
+};

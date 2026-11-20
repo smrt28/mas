@@ -76,6 +76,8 @@ pub struct Piece {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
     Join { game: String },
+    JoinWaiting { game: String },
+    ListGames,
     Place { at: usize, rank: Rank },
     Remove { at: usize },
     AutoPlace,
@@ -117,6 +119,7 @@ pub struct View {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Reply {
+    Games { games: Vec<String> },
     State { view: View },
     Error { message: String },
 }

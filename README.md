@@ -6,6 +6,15 @@ A two-player hidden-army board game in Rust, with a native **Bevy 0.18** client 
 
 Install a current stable Rust toolchain (tested with Rust 1.95). The graphical client needs a desktop session and a Vulkan/Metal/DX12-capable graphics driver. On Linux, install Bevy's [native build dependencies](https://bevy.org/learn/quick-start/getting-started/setup/).
 
+Generate the private build key once, then build both friend-distribution binaries from the same checkout:
+
+```sh
+python3 tools/generate_shared_key.py
+cargo build --release --bins
+```
+
+The generator creates `.secrets/multiplayer.key` (32 OS-random bytes, owner-only permissions), refuses to overwrite an existing key, and never prints it. Git ignores `.secrets/` and `target/`. `build.rs` embeds the same key in both binaries; builds fail if it is missing or not exactly 32 bytes. Distribute `target/release/mas-client` to friends and run the matching `target/release/mas-server`; no separate key file is needed at runtime. Keep the local key for matching rebuilds. For builds elsewhere, set `MAS_SHARED_KEY_FILE` to a securely supplied 32-byte file outside source control. CI generates its own disposable test key, not a distribution key.
+
 From this directory, start the server:
 
 ```sh
@@ -18,7 +27,7 @@ Start a client on each player's computer:
 cargo run --release --bin mas-client
 ```
 
-Enter the server address (`127.0.0.1:4000` for local play, or the server machine's address for LAN/remote play), enter a game name, and press Enter. Tab switches fields. The first player creates the room; the second joins by entering **exactly the same name**. Names are case-sensitive and surrounding whitespace is trimmed. The room starts deployment as soon as both players connect. A third player must choose another name.
+Enter the server address (`127.0.0.1:4000` for local play, or the server machine's address for LAN/remote play). **Waiting games** lists rooms with one player; click a game to join directly, without typing its name. The list refreshes automatically about every two seconds and reloads when the server address changes. Previous/Next buttons page through longer lists. To create a game, enter a new name below and press Enter. Tab switches fields. You can also join by entering an existing game name. Names are case-sensitive and surrounding whitespace is trimmed. The room starts deployment as soon as both players connect. Games that start, expire or disappear cannot be joined from an outdated list.
 
 You can also prefill and join directly:
 
@@ -55,9 +64,9 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-The 44 rules/session/plan tests include randomized matches, private JSON views, server clocks, inventory conservation, combat exceptions, room isolation and cleanup, exact printed-cell and card picking in both orientations, and a complete deployment/move through those coordinates. Eight client tests verify automatic Ready, join/leave window sizing, per-player clocks, initial/placed/returned reserve counts, preserved user resizing, every printed card’s clicks, highlight bounds and count anchors after wide/tall and high-DPI resizes, that every game phase fits inside the full sheet and fixed-height bar, the disconnect dialog’s input blocking and return to the main screen, and bold flag-capture results with OK acknowledgement. Geometry checks cover the PDF aspect ratio, uniform scaling, rotated card/cell picking at several sizes, and ignored clicks in the margins. These tests do not need a GPU, display, or sockets.
+The 45 rules/session/plan tests include randomized matches, private JSON views, server clocks, inventory conservation, combat exceptions, room isolation and cleanup, exact printed-cell and card picking in both orientations, and a complete deployment/move through those coordinates. Ten client tests verify automatic Ready, join/leave window sizing, per-player clocks, initial/placed/returned reserve counts, preserved user resizing, every printed card’s clicks, highlight bounds and count anchors after wide/tall and high-DPI resizes, that every game phase fits inside the full sheet and fixed-height bar, the disconnect dialog’s input blocking and return to the main screen, bold flag-capture results with OK acknowledgement, and paginated one-click lobby joins with stale-response handling. Geometry checks cover the PDF aspect ratio, uniform scaling, rotated card/cell picking at several sizes, and ignored clicks in the margins. These tests do not need a GPU, display, or sockets.
 
-The live TCP integration test starts the actual server and connects several clients. It checks matchmaking, third-player rejection, private deployment, moves, automatic setup, timeout loss, and interrupted games on disconnect:
+The live TCP integration test starts the actual server and connects several clients. It checks waiting-game discovery and direct joining, matchmaking, third-player rejection, private deployment, moves, automatic setup, timeout loss, and interrupted games on disconnect:
 
 ```sh
 cargo test --locked --no-default-features --features network-tests --test network
@@ -75,6 +84,16 @@ cargo run --bin mas-client -- --headless --preview --screenshot /tmp/mas-preview
 ```
 
 `--preview` is an offline artwork preview, not a local opponent.
+
+## Authenticated transport
+
+All TCP connections, including waiting-game discovery, authenticate before joining a room or receiving game data. The server sends only a plaintext `MAS\x01` marker and a cryptographically random 64-bit session number before authentication. Both sides enforce a three-second total authentication deadline. Unauthenticated peers count toward connection limits but never occupy a player slot.
+
+Each binary frame contains, in order: protocol version (`u16`), session (`u64`), direction (`u8`, 1=client→server, 2=server→client), sequence (`u64`), message type (`u8`, 1=proof, 2=acknowledgement, 3=action, 4=reply), payload length (`u32`), exact JSON payload bytes, and a full 32-byte HMAC-SHA-256 tag. Integers use big-endian encoding. The MAC covers `MAS-HMAC\0`, the entire 24-byte header, and the exact payload bytes; it uses the crypto library’s constant-time `verify_slice` API. Payloads remain plaintext.
+
+Client proof and server acknowledgement have empty payloads and use sequence 1 in their respective directions. Application traffic continues at sequence 2, with independent ordered counters. Receivers verify version, session, direction, type, exact next sequence, length and HMAC before deserializing data; counters advance only after successful verification and never wrap. Reconnects use a new OS-random session and fresh counters. Invalid authentication, malformed frames, tampering and replays close the connection. Legacy unauthenticated clients cannot join.
+
+The live TCP test checks valid authenticated discovery/joining, wrong-key and unauthenticated admission rejection, admission timeout, altered payloads, duplicate proofs and actions, and proofs/actions replayed on later connections. Unit tests cover every authenticated header/payload/tag byte, truncation, size limits, direction reflection and counter exhaustion. With `network-tests`, the actual client networking worker also browses and joins using the embedded key.
 
 ## Layout
 

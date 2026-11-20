@@ -192,3 +192,72 @@ fn client_legal_targets_match_authoritative_rules() {
         }
     }
 }
+
+#[test]
+fn waiting_list_only_contains_joinable_rooms_and_stale_entries_never_create_rooms() {
+    let cfg = Config {
+        waiting_seconds: 1,
+        ..Config::default()
+    };
+    let mut sessions = Sessions::default();
+    assert!(sessions.waiting_games(0).is_empty());
+    join(&mut sessions, 0, "Zulu", 0, &cfg).unwrap();
+    join(&mut sessions, 1, "Alpha", 0, &cfg).unwrap();
+    assert_eq!(sessions.waiting_games(10), vec!["Alpha", "Zulu"]);
+    sessions
+        .command(
+            2,
+            Action::JoinWaiting {
+                game: "Alpha".into(),
+            },
+            10,
+            &cfg,
+        )
+        .unwrap();
+    assert_eq!(sessions.view(2, 10).unwrap().phase, Phase::Placement);
+    assert_eq!(sessions.waiting_games(10), vec!["Zulu"]);
+    assert!(
+        sessions
+            .command(
+                3,
+                Action::JoinWaiting {
+                    game: "Alpha".into()
+                },
+                10,
+                &cfg
+            )
+            .is_err()
+    );
+    sessions.disconnect(0);
+    assert!(sessions.waiting_games(10).is_empty());
+    assert!(
+        sessions
+            .command(
+                3,
+                Action::JoinWaiting {
+                    game: "Zulu".into()
+                },
+                10,
+                &cfg
+            )
+            .is_err()
+    );
+    assert_eq!(sessions.room_count(), 1);
+    join(&mut sessions, 4, "Expiring", 0, &cfg).unwrap();
+    // Listing and joining both respect expiry, even before the next server tick.
+    assert!(sessions.waiting_games(1000).is_empty());
+    assert!(
+        sessions
+            .command(
+                5,
+                Action::JoinWaiting {
+                    game: "Expiring".into()
+                },
+                1000,
+                &cfg
+            )
+            .is_err()
+    );
+    assert!(!sessions.contains(3));
+    assert!(!sessions.contains(5));
+}

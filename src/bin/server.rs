@@ -1,7 +1,6 @@
 use marsal_a_spion::{Action, Config, Reply, net, session::Sessions};
 use std::{
     collections::HashMap,
-    io::BufReader,
     net::{Shutdown, TcpListener, TcpStream},
     sync::mpsc::{self, SyncSender},
     thread,
@@ -9,6 +8,7 @@ use std::{
 };
 
 enum Event {
+    Authenticated(u64),
     Command(u64, Action),
     Gone(u64),
 }
@@ -18,6 +18,7 @@ struct Peer {
     connected: u64,
     rate_start: u64,
     commands: u32,
+    authenticated: bool,
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args().nth(1).unwrap_or("config.toml".into());
@@ -58,31 +59,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let id = next;
             next += 1;
             let (out, writer_rx) = mpsc::sync_channel(16);
-            let mut writer = stream.try_clone()?;
-            let writer_events = tx.clone();
+            let mut transport = stream.try_clone()?;
+            let connection_events = tx.clone();
             thread::spawn(move || {
-                while let Ok(reply) = writer_rx.recv() {
-                    if net::write_frame(&mut writer, &reply).is_err() {
+                let Ok((mut outgoing, mut incoming)) = net::server_handshake(&mut transport) else {
+                    let _ = transport.shutdown(Shutdown::Both);
+                    let _ = connection_events.send(Event::Gone(id));
+                    return;
+                };
+                if connection_events.send(Event::Authenticated(id)).is_err() {
+                    return;
+                }
+                let Ok(mut writer) = transport.try_clone() else {
+                    let _ = transport.shutdown(Shutdown::Both);
+                    let _ = connection_events.send(Event::Gone(id));
+                    return;
+                };
+                let writer_events = connection_events.clone();
+                thread::spawn(move || {
+                    while let Ok(reply) = writer_rx.recv() {
+                        if outgoing.send(&mut writer, &reply).is_err() {
+                            break;
+                        }
+                    }
+                    let _ = writer.shutdown(Shutdown::Both);
+                    let _ = writer_events.send(Event::Gone(id));
+                });
+                while let Ok(action) = incoming.receive::<Action>(&mut transport, 4096) {
+                    if connection_events
+                        .try_send(Event::Command(id, action))
+                        .is_err()
+                    {
                         break;
                     }
                 }
-                let _ = writer.shutdown(Shutdown::Both);
-                let _ = writer_events.send(Event::Gone(id));
-            });
-            let reader_stream = stream.try_clone()?;
-            let reader_events = tx.clone();
-            thread::spawn(move || {
-                let mut reader = BufReader::new(reader_stream);
-                while let Ok(line) = net::read_frame(&mut reader, 4096) {
-                    let Ok(action) = serde_json::from_str(&line) else {
-                        break;
-                    };
-                    if reader_events.try_send(Event::Command(id, action)).is_err() {
-                        break;
-                    }
-                }
-                let _ = reader.get_ref().shutdown(Shutdown::Both);
-                let _ = reader_events.send(Event::Gone(id));
+                let _ = transport.shutdown(Shutdown::Both);
+                let _ = connection_events.send(Event::Gone(id));
             });
             peers.insert(
                 id,
@@ -92,6 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     connected: now,
                     rate_start: now,
                     commands: 0,
+                    authenticated: false,
                 },
             );
         }
@@ -104,6 +117,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(_) => break,
             };
             match event {
+                Event::Authenticated(id) => {
+                    if let Some(peer) = peers.get_mut(&id) {
+                        peer.authenticated = true;
+                    }
+                }
                 Event::Gone(id) => {
                     disconnect(id, &mut peers, &mut sessions);
                     dirty = true;
@@ -112,6 +130,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let Some(peer) = peers.get_mut(&id) else {
                         continue;
                     };
+                    if !peer.authenticated {
+                        continue;
+                    }
                     if now - peer.rate_start >= 1000 {
                         peer.rate_start = now;
                         peer.commands = 0;
@@ -120,6 +141,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if peer.commands > 100 {
                         disconnect(id, &mut peers, &mut sessions);
                         dirty = true;
+                        continue;
+                    }
+                    if matches!(action, Action::ListGames) {
+                        if peer
+                            .out
+                            .try_send(Reply::Games {
+                                games: sessions.waiting_games(now),
+                            })
+                            .is_err()
+                        {
+                            disconnect(id, &mut peers, &mut sessions);
+                            dirty = true;
+                        }
                         continue;
                     }
                     let result = sessions.command(id, action, now, &cfg);
@@ -134,7 +168,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let expired: Vec<_> = peers
             .iter()
-            .filter(|(id, p)| !sessions.contains(**id) && now - p.connected >= 30_000)
+            .filter(|(id, p)| {
+                (!p.authenticated && now - p.connected >= net::AUTH_TIMEOUT.as_millis() as u64)
+                    || (!sessions.contains(**id) && now - p.connected >= 30_000)
+            })
             .map(|(id, _)| *id)
             .collect();
         for id in expired {

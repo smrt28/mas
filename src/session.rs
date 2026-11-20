@@ -17,6 +17,21 @@ impl Sessions {
     pub fn room_count(&self) -> usize {
         self.rooms.len()
     }
+    /// Only rooms with one commander and an unexpired waiting clock are joinable.
+    pub fn waiting_games(&self, now: u64) -> Vec<String> {
+        let mut games: Vec<_> = self
+            .rooms
+            .iter()
+            .filter(|(_, room)| {
+                matches!(room.game.phase, Phase::Waiting)
+                    && room.game.deadline > now
+                    && room.seats.iter().filter(|seat| seat.is_some()).count() == 1
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        games.sort();
+        games
+    }
     pub fn command(
         &mut self,
         id: u64,
@@ -32,12 +47,17 @@ impl Sessions {
                 .game
                 .apply(*p, action, now, cfg);
         }
-        let Action::Join { game } = action else {
-            return Err("Join a named game first".into());
+        let (game, existing_only) = match action {
+            Action::Join { game } => (game, false),
+            Action::JoinWaiting { game } => (game, true),
+            _ => return Err("Join a named game first".into()),
         };
         let name = game.trim().to_string();
         if name.is_empty() || name.chars().count() > 48 || name.chars().any(char::is_control) {
             return Err("Game name must contain 1–48 printable characters".into());
+        }
+        if existing_only && !self.waiting_games(now).contains(&name) {
+            return Err("That game is no longer waiting. Choose another game.".into());
         }
         if !self.rooms.contains_key(&name) && self.rooms.len() >= cfg.max_rooms {
             return Err("Server room limit reached".into());

@@ -1,2 +1,5 @@
 /target/
 *.log
+
+# Local build-time shared authentication key; never commit.
+/.secrets/
