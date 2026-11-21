@@ -21,6 +21,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn server_address(address: &str) -> String {
+    let address = address.trim();
+    let port = hard_config::DEFAULT_PORT;
+    if address.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{address}]:{port}")
+    } else if !address.is_empty() && (!address.contains(':') || address.ends_with(']')) {
+        format!("{address}:{port}")
+    } else {
+        address.to_string()
+    }
+}
+
 struct LoginLayout {
     x: f32,
     game_y: f32,
@@ -385,7 +397,7 @@ impl Client {
         self.dirty = true;
         self.session += 1;
         let session = self.session;
-        let address = self.address.clone();
+        let address = server_address(&self.address);
         let events = self.sender.clone();
         thread::spawn(move || {
             let result = (|| -> std::io::Result<TcpStream> {
@@ -497,7 +509,7 @@ fn main() {
         .windows(2)
         .find(|a| a[0] == "--server")
         .map(|a| a[1].clone())
-        .unwrap_or("127.0.0.1:4000".into());
+        .unwrap_or_else(|| hard_config::DEFAULT_HOSTNAME.into());
     let room = args
         .windows(2)
         .find(|a| a[0] == "--room")
@@ -2062,6 +2074,22 @@ fn screenshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn server_addresses_default_to_4000_and_preserve_explicit_ports() {
+        for (input, expected) in [
+            ("localhost", "localhost:4000"),
+            (" game.example ", "game.example:4000"),
+            ("127.0.0.1", "127.0.0.1:4000"),
+            ("localhost:1234", "localhost:1234"),
+            ("[::1]", "[::1]:4000"),
+            ("::1", "[::1]:4000"),
+            ("[::1]:1234", "[::1]:1234"),
+            ("", ""),
+            ("localhost:", "localhost:"),
+        ] {
+            assert_eq!(server_address(input), expected);
+        }
+    }
     fn fixture() -> (Client, SyncSender<(u64, Event)>, Receiver<Action>) {
         let (events_tx, events_rx) = mpsc::sync_channel(16);
         let (actions_tx, actions_rx) = mpsc::sync_channel(16);

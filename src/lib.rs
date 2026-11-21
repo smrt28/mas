@@ -1,4 +1,6 @@
 //! Authoritative rules and wire protocol. Coordinates are always server coordinates.
+pub mod hard_config;
+
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
@@ -168,7 +170,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            bind: "0.0.0.0:4000".into(),
+            bind: format!("0.0.0.0:{}", hard_config::DEFAULT_PORT),
             placement_seconds: 120,
             turn_delay_seconds: 10,
             main_time_seconds: 180,
