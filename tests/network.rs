@@ -31,10 +31,16 @@ impl Player {
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        let (outgoing, incoming) = net::client_handshake(&mut stream).unwrap();
+        let (outgoing, mut incoming) = net::client_handshake(&mut stream).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
+        assert!(matches!(
+            incoming
+                .receive::<Reply>(&mut stream, net::MAX_FRAME)
+                .unwrap(),
+            Reply::Games { .. }
+        ));
         Self {
             stream,
             outgoing,
@@ -213,12 +219,9 @@ fn tcp_matchmaking_privacy_moves_timeouts_and_disconnects() {
     }
     check_rejected_connections(port);
     let mut browser = Player::new(port);
-    browser.send(Action::ListGames);
-    assert!(matches!(browser.reply(), Reply::Games { games } if games.is_empty()));
     let mut a = Player::new(port);
     a.join("test match");
     a.until(|v| matches!(v.phase, Phase::Waiting));
-    browser.send(Action::ListGames);
     let Reply::Games { games } = browser.reply() else {
         panic!("Expected lobby list")
     };
@@ -229,7 +232,6 @@ fn tcp_matchmaking_privacy_moves_timeouts_and_disconnects() {
     });
     a.until(|v| matches!(v.phase, Phase::Placement));
     b.until(|v| matches!(v.phase, Phase::Placement));
-    browser.send(Action::ListGames);
     assert!(matches!(browser.reply(), Reply::Games { games } if games.is_empty()));
     browser.send(Action::JoinWaiting {
         game: "test match".into(),
@@ -240,6 +242,19 @@ fn tcp_matchmaking_privacy_moves_timeouts_and_disconnects() {
     assert!(matches!(third.reply(), Reply::Error { .. }));
     third.join("other match");
     third.until(|v| matches!(v.phase, Phase::Waiting));
+    // A second observer receives additions/removals without sending any request.
+    let mut observer = Player::new(port);
+    let mut temporary = Player::new(port);
+    temporary.join("temporary match");
+    temporary.until(|v| matches!(v.phase, Phase::Waiting));
+    assert!(
+        matches!(observer.reply(), Reply::Games { games } if games == vec!["other match", "temporary match"])
+    );
+    drop(temporary);
+    assert!(matches!(observer.reply(), Reply::Games { games } if games == vec!["other match"]));
+    drop(observer);
+    // Reauthentication receives a fresh initial list on the same protocol.
+    let _reconnected_observer = Player::new(port);
     // Guaranteed front-row mobile piece, then preserve it while filling the army.
     a.send(Action::Place {
         at: 70,

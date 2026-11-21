@@ -19,6 +19,7 @@ struct Peer {
     rate_start: u64,
     commands: u32,
     authenticated: bool,
+    lobby_games: Option<Vec<String>>,
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args().nth(1).unwrap_or("config.toml".into());
@@ -107,6 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     rate_start: now,
                     commands: 0,
                     authenticated: false,
+                    lobby_games: None,
                 },
             );
         }
@@ -170,13 +172,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let expired: Vec<_> = peers
             .iter()
-            .filter(|(id, p)| {
-                (!p.authenticated && now - p.connected >= net::AUTH_TIMEOUT.as_millis() as u64)
-                    || (!sessions.contains(**id) && now - p.connected >= 30_000)
+            .filter(|(_, p)| {
+                !p.authenticated && now - p.connected >= net::AUTH_TIMEOUT.as_millis() as u64
             })
             .map(|(id, _)| *id)
             .collect();
         for id in expired {
+            disconnect(id, &mut peers, &mut sessions);
+            dirty = true;
+        }
+        // Authenticated peers outside a room remain subscribed to the lobby.
+        // Send a fresh snapshot on admission and whenever joinability changes.
+        let games = sessions.waiting_games(now);
+        let mut slow_lobby = Vec::new();
+        for (id, peer) in &mut peers {
+            if peer.authenticated
+                && !sessions.contains(*id)
+                && peer.lobby_games.as_ref() != Some(&games)
+            {
+                if peer
+                    .out
+                    .try_send(Reply::Games {
+                        games: games.clone(),
+                    })
+                    .is_err()
+                {
+                    slow_lobby.push(*id);
+                } else {
+                    peer.lobby_games = Some(games.clone());
+                }
+            }
+        }
+        for id in slow_lobby {
             disconnect(id, &mut peers, &mut sessions);
             dirty = true;
         }

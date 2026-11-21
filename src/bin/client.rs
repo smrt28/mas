@@ -29,6 +29,16 @@ struct LoginLayout {
     width: f32,
     scale: f32,
 }
+impl LoginLayout {
+    fn connection_button(&self) -> plan::Rect {
+        plan::Rect {
+            left: self.x + self.width / 2. - 104. * self.scale,
+            top: self.server_y - 18. * self.scale,
+            width: 104. * self.scale,
+            height: 36. * self.scale,
+        }
+    }
+}
 fn login_layout(surface: plan::Layout) -> LoginLayout {
     let scale = ((surface.width - 32.) / 382.).clamp(0.1, 1.);
     let margin = 64_f32.min((surface.width - 382. * scale) / 2.);
@@ -153,19 +163,12 @@ struct Art {
 struct Lobby {
     address: String,
     games: Vec<String>,
-    requested: Option<Instant>,
     loading: bool,
     loaded: bool,
-    generation: u64,
-    error: String,
     page: usize,
 }
 enum Event {
-    Games {
-        generation: u64,
-        address: String,
-        result: Result<Vec<String>, String>,
-    },
+    ConnectingSocket(TcpStream),
     Connected(SyncSender<Action>, TcpStream),
     Reply(Reply),
     Failed(String),
@@ -217,7 +220,7 @@ struct Client {
     broken: bool,
     lobby: Lobby,
     join_waiting: bool,
-    connected_address: String,
+    auto_join: bool,
     motion: Option<MovePlayback>,
 }
 impl Client {
@@ -254,6 +257,7 @@ impl Client {
         self.broken = false;
         self.error.clear();
         self.connecting = false;
+        self.auto_join = false;
         self.lobby = Lobby::default();
         self.dirty = true;
     }
@@ -269,6 +273,7 @@ impl Client {
         self.selected = None;
         self.error.clear();
         self.broken = true;
+        self.lobby = Lobby::default();
         self.motion = None;
         self.dirty = true;
     }
@@ -293,25 +298,32 @@ impl Client {
             self.dirty = true;
             return;
         }
-        if self.tx.is_some() && self.connected_address != self.address {
-            if let Some(socket) = self.socket.take() {
-                let _ = socket.shutdown(Shutdown::Both);
-            }
-            self.tx = None;
-            self.session += 1;
-        }
         if self.tx.is_some() {
             self.send(self.join_action());
+        }
+    }
+    fn toggle_connection(&mut self) {
+        if self.connecting || self.tx.is_some() {
+            self.leave();
+        } else {
+            self.start_connection();
+        }
+    }
+    fn start_connection(&mut self) {
+        if self.connecting || self.tx.is_some() {
             return;
         }
+        self.lobby = Lobby {
+            address: self.address.clone(),
+            loading: true,
+            ..default()
+        };
         self.connecting = true;
-        self.lobby.loading = false;
         self.error.clear();
         self.dirty = true;
         self.session += 1;
         let session = self.session;
         let address = self.address.clone();
-        self.connected_address = address.clone();
         let events = self.sender.clone();
         thread::spawn(move || {
             let result = (|| -> std::io::Result<TcpStream> {
@@ -330,6 +342,23 @@ impl Client {
                     return;
                 }
             };
+            // Expose the socket before authentication so cancel can interrupt
+            // an in-flight handshake as well as an established connection.
+            match stream.try_clone() {
+                Ok(socket) => {
+                    if events
+                        .send((session, Event::ConnectingSocket(socket)))
+                        .is_err()
+                    {
+                        let _ = stream.shutdown(Shutdown::Both);
+                        return;
+                    }
+                }
+                Err(error) => {
+                    let _ = events.send((session, Event::Failed(error.to_string())));
+                    return;
+                }
+            }
             let (mut outgoing, mut incoming) = match net::client_handshake(&mut stream) {
                 Ok(states) => states,
                 Err(_) => {
@@ -434,11 +463,12 @@ fn main() {
         broken: false,
         lobby: Lobby::default(),
         join_waiting: false,
-        connected_address: String::new(),
+        auto_join: false,
         motion: None,
     };
     if autojoin {
-        client.connect();
+        client.auto_join = true;
+        client.start_connection();
     }
     let headless = args.iter().any(|a| a == "--headless");
     let mut app = App::new();
@@ -473,7 +503,6 @@ fn main() {
         .add_systems(
             Update,
             (
-                browse,
                 receive,
                 fit_surface,
                 animate_motion,
@@ -575,116 +604,35 @@ fn fit_surface(
     }
 }
 
-/// Poll on a short-lived connection; browsing never occupies a game seat.
-fn browse(mut c: ResMut<Client>) {
-    if c.view.is_some() || c.connecting || c.preview || c.broken {
-        return;
-    }
-    if c.lobby.address != c.address {
-        c.lobby = Lobby {
-            address: c.address.clone(),
-            generation: c.lobby.generation + 1,
-            requested: Some(Instant::now()),
-            ..default()
-        };
-        c.dirty = true;
-    }
-    let delay = if !c.lobby.loaded { 400 } else { 2000 };
-    if c.lobby.loading
-        || c.address.trim().is_empty()
-        || c.lobby
-            .requested
-            .is_some_and(|time| time.elapsed() < Duration::from_millis(delay))
-    {
-        return;
-    }
-    c.lobby.requested = Some(Instant::now());
-    c.lobby.loading = true;
-    c.dirty = true;
-    let address = c.address.clone();
-    let events = c.sender.clone();
-    let session = c.session;
-    let generation = c.lobby.generation;
-    thread::spawn(move || {
-        let result = (|| -> Result<Vec<String>, String> {
-            let mut stream = address
-                .to_socket_addrs()
-                .map_err(|e| e.to_string())?
-                .find_map(|addr| TcpStream::connect_timeout(&addr, Duration::from_secs(2)).ok())
-                .ok_or_else(|| "Cannot reach server".to_string())?;
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .map_err(|e| e.to_string())?;
-            stream
-                .set_write_timeout(Some(Duration::from_secs(2)))
-                .map_err(|e| e.to_string())?;
-            let (mut outgoing, mut incoming) = net::client_handshake(&mut stream)
-                .map_err(|_| "Server authentication failed".to_string())?;
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .map_err(|e| e.to_string())?;
-            outgoing
-                .send(&mut stream, &Action::ListGames)
-                .map_err(|e| e.to_string())?;
-            match incoming
-                .receive::<Reply>(&mut stream, net::MAX_FRAME)
-                .map_err(|e| e.to_string())?
-            {
-                Reply::Games { games } => Ok(games),
-                Reply::Error { message } => Err(message),
-                _ => Err("Server did not return waiting games".into()),
-            }
-        })();
-        let _ = events.send((
-            session,
-            Event::Games {
-                generation,
-                address,
-                result,
-            },
-        ));
-    });
-}
 fn receive(mut c: ResMut<Client>) {
     let events: Vec<_> = c.events.lock().unwrap().try_iter().collect();
     for (session, event) in events {
         if session != c.session {
+            if let Event::Connected(_, socket) | Event::ConnectingSocket(socket) = event {
+                let _ = socket.shutdown(Shutdown::Both);
+            }
             continue;
         }
         match event {
-            Event::Games {
-                generation,
-                address,
-                result,
-            } => {
-                if generation != c.lobby.generation
-                    || address != c.address
-                    || c.view.is_some()
-                    || c.connecting
-                {
-                    continue;
+            Event::ConnectingSocket(socket) => c.socket = Some(socket),
+            Event::Reply(Reply::Games { games }) => {
+                if c.view.is_none() && c.tx.is_some() {
+                    c.lobby.games = games;
+                    c.lobby.loaded = true;
+                    c.lobby.loading = false;
+                    c.dirty = true;
                 }
-                c.lobby.loading = false;
-                c.lobby.loaded = true;
-                match result {
-                    Ok(games) => {
-                        c.lobby.games = games;
-                        c.lobby.error.clear();
-                    }
-                    Err(message) => {
-                        c.lobby.games.clear();
-                        c.lobby.error = message;
-                    }
-                }
-                c.dirty = true;
             }
-            Event::Reply(Reply::Games { .. }) => {}
             Event::Connected(tx, socket) => {
                 c.tx = Some(tx);
                 c.socket = Some(socket);
                 c.connecting = false;
-                let action = c.join_action();
-                c.send(action);
+                c.field = 1;
+                c.dirty = true;
+                if c.auto_join {
+                    c.auto_join = false;
+                    c.connect();
+                }
             }
             Event::Reply(Reply::State { view }) => {
                 if matches!(&view.phase, Phase::Finished { reason, .. } if reason == "Opponent disconnected")
@@ -754,9 +702,7 @@ fn receive(mut c: ResMut<Client>) {
                     c.break_connection();
                     continue;
                 }
-                c.tx = None;
-                c.socket = None;
-                c.connecting = false;
+                c.leave();
                 c.error = format!("Disconnected: {message}");
                 c.dirty = true;
             }
@@ -820,15 +766,18 @@ fn input(
                     c.dirty = true;
                 }
                 Key::Backspace => {
-                    if c.field == 0 {
+                    if c.field == 0 && !c.connecting && c.tx.is_none() {
                         c.address.pop();
-                    } else {
+                    } else if c.field == 1 {
                         c.room.pop();
                     }
                     c.dirty = true;
                 }
-                Key::Enter if !c.connecting => c.connect(),
-                Key::Character(s) if !c.connecting && !s.chars().any(char::is_control) => {
+                Key::Enter if c.tx.is_some() => c.connect(),
+                Key::Character(s)
+                    if (c.field == 1 || (!c.connecting && c.tx.is_none()))
+                        && !s.chars().any(char::is_control) =>
+                {
                     let field = if c.field == 0 {
                         &mut c.address
                     } else {
@@ -859,7 +808,7 @@ fn input(
     let right = mouse.just_pressed(MouseButton::Right);
     if c.view.is_none() {
         let login = login_layout(surface.layout);
-        if clicked && !c.connecting {
+        if clicked && c.tx.is_some() {
             let waiting = WaitingLayout::new(surface.layout);
             let page = waiting.page(&c.lobby);
             if c.lobby.address == c.address {
@@ -885,7 +834,19 @@ fn input(
             }
         }
         if clicked {
-            if hit(pos, login.x, login.server_y, login.width, 36. * login.scale) {
+            if login.connection_button().contains(cursor_point) {
+                c.toggle_connection();
+                return;
+            }
+            if hit(
+                pos,
+                login.x - 55. * login.scale,
+                login.server_y,
+                login.width - 110. * login.scale,
+                36. * login.scale,
+            ) && !c.connecting
+                && c.tx.is_none()
+            {
                 c.field = 0;
                 c.dirty = true;
             }
@@ -893,7 +854,7 @@ fn input(
                 c.field = 1;
                 c.dirty = true;
             }
-            if hit(pos, login.x, login.enter_y, login.width, 34. * login.scale) && !c.connecting {
+            if hit(pos, login.x, login.enter_y, login.width, 34. * login.scale) && c.tx.is_some() {
                 c.connect();
             }
         }
@@ -1289,9 +1250,9 @@ fn paint(
         {
             rect(
                 &mut cmd,
-                login.x,
+                login.x - if i == 0 { 55. * scale } else { 0. },
                 y,
-                login.width,
+                login.width - if i == 0 { 110. * scale } else { 0. },
                 36. * scale,
                 3.,
                 if c.field == i {
@@ -1312,12 +1273,12 @@ fn paint(
             let tail: String = value
                 .chars()
                 .rev()
-                .take(28)
+                .take(if i == 0 { 15 } else { 28 })
                 .collect::<Vec<_>>()
                 .into_iter()
                 .rev()
                 .collect();
-            let display = if value.chars().count() > 28 {
+            let display = if value.chars().count() > if i == 0 { 15 } else { 28 } {
                 format!("…{tail}")
             } else {
                 tail
@@ -1331,7 +1292,7 @@ fn paint(
                 16. * scale,
                 ink,
             );
-            if c.field == i && !c.connecting {
+            if c.field == i && (i == 1 || (!c.connecting && c.tx.is_none())) {
                 cmd.entity(value_label).with_children(|parent| {
                     parent.spawn((
                         TextSpan::new("│"),
@@ -1346,6 +1307,36 @@ fn paint(
                 });
             }
         }
+        let button = login.connection_button();
+        let center = button.center();
+        rect(
+            &mut cmd,
+            center.x,
+            center.y,
+            button.width,
+            button.height,
+            5.,
+            if c.tx.is_some() {
+                Color::srgb(0.08, 0.48, 0.2)
+            } else {
+                Color::srgb(0.65, 0.12, 0.1)
+            },
+        );
+        label(
+            &mut cmd,
+            &art,
+            if c.connecting {
+                "Connecting…"
+            } else if c.tx.is_some() {
+                "Connected"
+            } else {
+                "Connect"
+            },
+            button.left + 5. * scale,
+            center.y,
+            13. * scale,
+            ink,
+        );
         rect(
             &mut cmd,
             login.x,
@@ -1353,7 +1344,11 @@ fn paint(
             login.width,
             34. * scale,
             5.,
-            Color::srgb(0.6, 0.27, 0.18),
+            if c.tx.is_some() {
+                Color::srgb(0.6, 0.27, 0.18)
+            } else {
+                Color::srgb(0.2, 0.2, 0.2)
+            },
         );
         label(
             &mut cmd,
@@ -1427,10 +1422,10 @@ fn paint(
             );
         }
         if games.is_empty() {
-            let message = if c.lobby.address != c.address || !c.lobby.loaded || c.lobby.loading {
+            let message = if c.tx.is_none() && !c.connecting {
+                "Connect to see waiting games"
+            } else if c.lobby.address != c.address || !c.lobby.loaded || c.lobby.loading {
                 "Looking for games…"
-            } else if !c.lobby.error.is_empty() {
-                "Cannot load games — check server"
             } else {
                 "No waiting games. Create one below."
             };
@@ -2011,7 +2006,7 @@ mod tests {
             broken: false,
             lobby: Lobby::default(),
             join_waiting: false,
-            connected_address: String::new(),
+            auto_join: false,
             motion: None,
         };
         (client, events_tx, actions_rx)
@@ -2024,10 +2019,6 @@ mod tests {
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let (mut outgoing, mut incoming) = net::server_handshake(&mut stream).unwrap();
-            assert_eq!(
-                incoming.receive::<Action>(&mut stream, 4096).unwrap(),
-                Action::ListGames
-            );
             outgoing
                 .send(
                     &mut stream,
@@ -2036,9 +2027,6 @@ mod tests {
                     },
                 )
                 .unwrap();
-            drop(stream);
-            let (mut stream, _) = listener.accept().unwrap();
-            let (mut outgoing, mut incoming) = net::server_handshake(&mut stream).unwrap();
             assert_eq!(
                 incoming.receive::<Action>(&mut stream, 4096).unwrap(),
                 Action::JoinWaiting {
@@ -2054,9 +2042,9 @@ mod tests {
         client.tx = None;
         client.address = address.clone();
         client.lobby.address = address;
+        client.start_connection();
         let mut app = App::new();
-        app.insert_resource(client)
-            .add_systems(Update, (browse, receive).chain());
+        app.insert_resource(client).add_systems(Update, receive);
         let deadline = Instant::now() + Duration::from_secs(5);
         while app.world().resource::<Client>().lobby.games.is_empty() {
             assert!(
@@ -2402,67 +2390,116 @@ mod tests {
         }
     }
     #[test]
-    fn lobby_refresh_ignores_old_addresses_and_requests_and_handles_empty_and_failed_lists() {
-        let (mut client, events, _) = fixture();
-        client.address = "new:4000".into();
-        client.lobby.address = client.address.clone();
-        client.lobby.generation = 2;
-        client.lobby.loading = true;
-        let mut app = App::new();
-        app.insert_resource(client).add_systems(Update, receive);
-        events
-            .send((
-                0,
-                Event::Games {
-                    generation: 1,
-                    address: "new:4000".into(),
-                    result: Ok(vec!["stale generation".into()]),
-                },
-            ))
-            .unwrap();
-        events
-            .send((
-                0,
-                Event::Games {
-                    generation: 2,
-                    address: "old:4000".into(),
-                    result: Ok(vec!["stale server".into()]),
-                },
-            ))
-            .unwrap();
-        app.update();
-        assert!(app.world().resource::<Client>().lobby.games.is_empty());
-        assert!(app.world().resource::<Client>().lobby.loading);
-        for result in [
-            Ok(vec!["Available".into()]),
-            Ok(vec![]),
-            Err("Unavailable".into()),
-        ] {
-            events
-                .send((
-                    0,
-                    Event::Games {
-                        generation: 2,
-                        address: "new:4000".into(),
-                        result: result.clone(),
-                    },
-                ))
-                .unwrap();
-            app.update();
-            let lobby = &app.world().resource::<Client>().lobby;
-            assert!(!lobby.loading);
-            assert!(lobby.loaded);
-            match result {
-                Ok(games) => {
-                    assert_eq!(lobby.games, games);
-                    assert!(lobby.error.is_empty());
+    fn connection_controls_lock_address_gate_enter_and_cancel_at_all_sizes() {
+        for (w, h) in [(360., 480.), (600., 925.), (1280., 900.)] {
+            for state in 0..3 {
+                let (mut client, events, actions) = fixture();
+                client.address = "localhost:4000".into();
+                client.field = 0;
+                client.connecting = state == 1;
+                if state != 2 {
+                    client.tx = None;
                 }
-                Err(error) => {
-                    assert!(lobby.games.is_empty());
-                    assert_eq!(lobby.error, error);
+                let layout = plan::Layout::new(w, h);
+                let login = login_layout(layout);
+                let mut app = App::new();
+                app.insert_resource(client)
+                    .insert_resource(Surface {
+                        layout,
+                        playing: Some(false),
+                    })
+                    .init_resource::<ButtonInput<KeyCode>>()
+                    .init_resource::<ButtonInput<MouseButton>>()
+                    .add_message::<KeyboardInput>()
+                    .insert_resource(Art {
+                        font: default(),
+                        bold_font: default(),
+                        ranks: vec![Handle::default(); 11],
+                        board: default(),
+                        cover: default(),
+                    })
+                    .add_systems(Update, (receive, input, paint).chain());
+                let mut window = Window::default();
+                window.resolution.set(w, h);
+                let window = app.world_mut().spawn(window).id();
+                app.update();
+                let mut labels = app.world_mut().query::<&Text2d>();
+                let expected = ["Connect", "Connecting…", "Connected"][state];
+                assert!(labels.iter(app.world()).any(|t| t.0 == expected));
+                let mut carets = app.world_mut().query_filtered::<Entity, With<InputCaret>>();
+                assert_eq!(carets.iter(app.world()).count(), usize::from(state == 0));
+                for key in [Key::Character("x".into()), Key::Backspace, Key::Enter] {
+                    app.world_mut().write_message(KeyboardInput {
+                        key_code: KeyCode::KeyX,
+                        logical_key: key,
+                        state: bevy::input::ButtonState::Pressed,
+                        text: None,
+                        repeat: false,
+                        window,
+                    });
+                    app.update();
+                }
+                assert_eq!(app.world().resource::<Client>().address, "localhost:4000");
+                if state == 2 {
+                    assert!(matches!(actions.try_recv().unwrap(), Action::Join { .. }));
+                } else {
+                    assert!(actions.try_recv().is_err());
+                }
+                if state != 0 {
+                    let point = login.connection_button().center();
+                    app.world_mut()
+                        .get_mut::<Window>(window)
+                        .unwrap()
+                        .set_cursor_position(Some(Vec2::new(point.x + w / 2., h / 2. - point.y)));
+                    app.world_mut()
+                        .resource_mut::<ButtonInput<MouseButton>>()
+                        .press(MouseButton::Left);
+                    app.update();
+                    app.insert_resource(ButtonInput::<MouseButton>::default());
+                    events.send((0, Event::Failed("late".into()))).unwrap();
+                    app.update();
+                    let client = app.world().resource::<Client>();
+                    assert!(!client.connecting && client.tx.is_none());
+                    assert!(client.error.is_empty());
+                    assert!(client.lobby.games.is_empty());
                 }
             }
         }
+    }
+    #[test]
+    fn pushed_lobby_updates_and_canceled_results_are_session_bound() {
+        let (client, events, _) = fixture();
+        let mut app = App::new();
+        app.insert_resource(client).add_systems(Update, receive);
+        for games in [vec!["Available".to_string()], vec![]] {
+            events
+                .send((
+                    0,
+                    Event::Reply(Reply::Games {
+                        games: games.clone(),
+                    }),
+                ))
+                .unwrap();
+            app.update();
+            assert_eq!(app.world().resource::<Client>().lobby.games, games);
+        }
+        app.world_mut().resource_mut::<Client>().toggle_connection();
+        events
+            .send((
+                0,
+                Event::Reply(Reply::Games {
+                    games: vec!["stale".into()],
+                }),
+            ))
+            .unwrap();
+        events
+            .send((0, Event::Failed("late failure".into())))
+            .unwrap();
+        app.update();
+        let client = app.world().resource::<Client>();
+        assert!(client.tx.is_none());
+        assert!(client.lobby.games.is_empty());
+        assert!(client.error.is_empty());
     }
     #[test]
     fn flag_capture_reveals_board_and_shows_bold_result_until_ok() {
