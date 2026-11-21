@@ -49,6 +49,12 @@ impl Sessions {
         }
         let (game, existing_only) = match action {
             Action::Join { game } => (game, false),
+            Action::CreateGame { game } => {
+                if self.rooms.contains_key(game.trim()) {
+                    return Err("That game name is already in use".into());
+                }
+                (game, false)
+            }
             Action::JoinWaiting { game } => (game, true),
             _ => return Err("Join a named game first".into()),
         };

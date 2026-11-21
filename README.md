@@ -147,3 +147,34 @@ The live TCP test checks valid authenticated discovery/joining, wrong-key and un
 The authenticated binary frames described above carry JSON payloads: actions use a `type` field (`join`, `join_waiting`, `list_games`, `place`, `remove`, `auto_place`, `ready`, `move`, `claim_victory`, `resign`); replies are `state`, `games` or `error`. Coordinates are indices `0..109`, with index `y * 10 + x` on the 10-column, 11-row board; A11 is index 0 and J1 is index 109. The six blocked squares are D5–D7 and G5–G7; each commander deploys in their four back rows, leaving three neutral rows. Enemy ranks remain hidden during play except for the existing combat reports and captured pieces; all remaining pieces are revealed at match end. It records captured ranks and keeps only eight private field reports per player. Updates arrive at least every 250 ms, with immediate broadcasts for state changes such as claim availability. Clock snapshots contain both main balances, the active delay and authoritative claim eligibility; displays interpolate locally. `claim_victory` carries `turn_id`, which must equal the current state's `ply`. The server settles time before processing each action and rejects claims for any earlier turn. Expiry never automatically passes a turn or ends a game. Rebuild and distribute matching server/client binaries for this clock protocol.
 
 Rooms disappear when their last connection leaves. A waiting room expires after its configured lifetime; its occupant sees the result and can leave. A disconnect interrupts an unfinished game without a winner. The remaining player sees a “Broken pike” dialog; OK returns to the main screen. Losing the server connection during a game shows the same dialog. Finished rooms stay available to their occupants until they leave. Unjoined connections time out after 30 seconds. Oversized/malformed frames, excessive command rates and stalled output consumers are disconnected. No game state is written to disk.
+
+### Headless ChatGPT player (Linux)
+
+Build the headless client without Bevy or graphics dependencies:
+
+```sh
+cargo build --release --no-default-features --features ai-client --bin mas-ai-client
+cp config-ai.example.toml config-ai.toml
+chmod 600 config-ai.toml
+# Edit hostname, port, game, openai_api_key and model in config-ai.toml.
+./target/release/mas-ai-client config-ai.toml
+```
+
+The configuration path is the only command-line argument. Use an OpenAI API model that supports the Responses API with structured JSON output. The implementation follows the [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create) and [structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs) formats. The selected model decides deployment placements, readiness, moves, resignations and available time claims from numbered legal actions. OpenAI API usage is billed to the configured API key. No real API request is needed for the automated tests.
+
+The AI uses the same embedded multiplayer key, authentication and persistent connection worker as the graphical client. Rebuild the server too: the protocol adds a create-only action and public match settings. It creates the configured game, refuses an existing name, and waits for server-pushed opponent/game updates. It keeps receiving updates during API requests, rechecks decisions before sending them, discards stale turns, and retries invalid answers or API errors with a delay. There are no local strategic fallback moves. On completion it logs win/loss/draw; connection errors use fixed diagnostics; AI requests and response bodies are logged to the terminal with API credentials redacted. A disconnected client exits; it does not reconnect into another player's slot.
+
+If authentication succeeds but the connection closes immediately after the game-creation request, check that the server on the configured host has been rebuilt **and restarted**. A server built before the AI client does not recognize `create_game` and closes its authenticated connection. Rebuilding only the client, or rebuilding the server without restarting its existing process, is insufficient. The client distinguishes sending the request from receiving confirmation and reports the connection failure category without logging raw protocol data.
+
+Every model request is built from a separate observation object, never a serialized server reply. Both clients share an explicit rank-visibility filter. Opponent deployment is absent, unrevealed opponent ranks remain `null`, and undisplayed deployment counters remain `"?"`. Public remaining counters are derived from captures in the same way as the GUI. The AI receives the public rules, actual match settings, own ranks, visible clocks and filtered combat observations. Combat ranks enter memory only when the GUI would animate them, or when the latest visible combat-detail line legitimately identifies a rank. Completed/missed animations cannot reveal new ranks. The client respects the GUI's animation input pause. History records observations at the time/square they occurred; it does not turn remembered ranks into guaranteed current board information.
+
+`config-ai.toml` is ignored by Git. Keep any other configuration filename private as well. The API key is used only in the HTTPS authorization header; it is never included in prompts, logs, configuration diagnostics or server messages. Every OpenAI request and response body (including API error responses) is printed to the terminal with labeled boundaries and HTTP response status. Credentials echoed in a response are redacted, and authorization headers are never printed. Free-form server text is not logged or replayed into model requests. Requests set `store = false` and use the public OpenAI HTTPS endpoint.
+
+Run privacy and deterministic tests without sockets, then the Linux TCP/HTTP mock tests:
+
+```sh
+cargo test --no-default-features --features ai-client
+cargo test --no-default-features --features ai-client,network-tests
+```
+
+The tests inject unrevealed enemy ranks and compare the complete observation/action payloads and decision identities, verify short-lived legitimate reveals and unknown counters, exercise stale moves/claims, drive deployment and a move through the authenticated connection, and inspect an actual HTTP request against a local mock of the OpenAI endpoint. Mock error bodies and malformed configuration contain a sentinel credential to check that diagnostics do not echo it.

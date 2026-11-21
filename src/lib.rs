@@ -1,5 +1,9 @@
 //! Authoritative rules and wire protocol. Coordinates are always server coordinates.
+#[cfg(feature = "ai-client")]
+pub mod ai;
+pub mod connection;
 pub mod hard_config;
+pub mod visibility;
 
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
@@ -78,6 +82,7 @@ pub struct Piece {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
     Join { game: String },
+    CreateGame { game: String },
     JoinWaiting { game: String },
     ListGames,
     Place { at: usize, rank: Rank },
@@ -124,6 +129,29 @@ struct MoveEvent {
     defender: Option<Piece>,
     started_ms: u64,
 }
+/// Public per-match rules and clock settings; no server admission limits or secrets.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatchSettings {
+    pub placement_seconds: u64,
+    pub turn_delay_seconds: u64,
+    pub main_time_seconds: u64,
+    pub quiet_move_limit: u32,
+}
+impl From<&Config> for MatchSettings {
+    fn from(config: &Config) -> Self {
+        Self {
+            placement_seconds: config.placement_seconds,
+            turn_delay_seconds: config.turn_delay_seconds,
+            main_time_seconds: config.main_time_seconds,
+            quiet_move_limit: config.quiet_move_limit,
+        }
+    }
+}
+impl Default for MatchSettings {
+    fn default() -> Self {
+        Self::from(&Config::default())
+    }
+}
 /// An authoritative snapshot; array indices always use server player IDs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClockView {
@@ -134,6 +162,8 @@ pub struct ClockView {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct View {
     pub game: String,
+    #[serde(default)]
+    pub settings: Box<MatchSettings>,
     pub you: usize,
     pub phase: Phase,
     pub board: Vec<Option<VisiblePiece>>,
@@ -228,6 +258,7 @@ pub struct Game {
     pub ply: u32,
     quiet: u32,
     motion: Option<MoveEvent>,
+    settings: MatchSettings,
 }
 impl Game {
     pub fn new(now: u64, cfg: &Config) -> Self {
@@ -246,6 +277,7 @@ impl Game {
             ply: 0,
             quiet: 0,
             motion: None,
+            settings: MatchSettings::from(cfg),
         }
     }
     pub fn start(&mut self, now: u64, cfg: &Config) {
@@ -499,6 +531,7 @@ impl Game {
         let placement = matches!(self.phase, Phase::Placement | Phase::Waiting);
         View {
             game: name.into(),
+            settings: Box::new(self.settings.clone()),
             you: p,
             phase: self.phase.clone(),
             board: self

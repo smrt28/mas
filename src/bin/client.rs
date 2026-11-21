@@ -10,28 +10,22 @@ use bevy::{
     prelude::*,
     sprite::Anchor,
 };
-use marsal_a_spion::{net, plan, *};
+#[cfg(all(test, feature = "network-tests"))]
+use marsal_a_spion::net;
+use marsal_a_spion::{
+    connection::{self, Event, server_address},
+    plan, *,
+};
+#[cfg(all(test, feature = "network-tests"))]
+use std::thread;
 use std::{
-    net::{Shutdown, TcpStream, ToSocketAddrs},
+    net::{Shutdown, TcpStream},
     sync::{
         Mutex,
         mpsc::{self, Receiver, SyncSender},
     },
-    thread,
     time::{Duration, Instant},
 };
-
-fn server_address(address: &str) -> String {
-    let address = address.trim();
-    let port = hard_config::DEFAULT_PORT;
-    if address.parse::<std::net::Ipv6Addr>().is_ok() {
-        format!("[{address}]:{port}")
-    } else if !address.is_empty() && (!address.contains(':') || address.ends_with(']')) {
-        format!("{address}:{port}")
-    } else {
-        address.to_string()
-    }
-}
 
 struct LoginLayout {
     x: f32,
@@ -238,14 +232,9 @@ struct Lobby {
     loaded: bool,
     page: usize,
 }
-enum Event {
-    ConnectingSocket(TcpStream),
-    Connected(SyncSender<Action>, TcpStream),
-    Reply(Reply),
-    Failed(String),
-}
-const MOVE_TRAVEL_MS: f32 = 180.;
-const CAPTURE_FADE_MS: f32 = 220.;
+
+const MOVE_TRAVEL_MS: f32 = visibility::MOVE_TRAVEL_MS as f32;
+const CAPTURE_FADE_MS: f32 = visibility::CAPTURE_FADE_MS as f32;
 const CAPTURE_DURATION_MS: f32 = MOVE_TRAVEL_MS + CAPTURE_FADE_MS;
 struct MovePlayback {
     event: MoveView,
@@ -399,95 +388,7 @@ impl Client {
         let session = self.session;
         let address = server_address(&self.address);
         let events = self.sender.clone();
-        thread::spawn(move || {
-            let result = (|| -> std::io::Result<TcpStream> {
-                let addresses = address.to_socket_addrs()?;
-                for a in addresses {
-                    if let Ok(s) = TcpStream::connect_timeout(&a, Duration::from_secs(3)) {
-                        return Ok(s);
-                    }
-                }
-                Err(std::io::Error::other("Could not connect to server"))
-            })();
-            let mut stream = match result {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = events.send((session, Event::Failed(e.to_string())));
-                    return;
-                }
-            };
-            // Expose the socket before authentication so cancel can interrupt
-            // an in-flight handshake as well as an established connection.
-            match stream.try_clone() {
-                Ok(socket) => {
-                    if events
-                        .send((session, Event::ConnectingSocket(socket)))
-                        .is_err()
-                    {
-                        let _ = stream.shutdown(Shutdown::Both);
-                        return;
-                    }
-                }
-                Err(error) => {
-                    let _ = events.send((session, Event::Failed(error.to_string())));
-                    return;
-                }
-            }
-            let (mut outgoing, mut incoming) = match net::client_handshake(&mut stream) {
-                Ok(states) => states,
-                Err(_) => {
-                    let _ = stream.shutdown(Shutdown::Both);
-                    let _ = events.send((
-                        session,
-                        Event::Failed("Server authentication failed".into()),
-                    ));
-                    return;
-                }
-            };
-            let _ = stream.set_nodelay(true);
-            let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
-            let mut writer = match stream.try_clone() {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = events.send((session, Event::Failed(e.to_string())));
-                    return;
-                }
-            };
-            let reader = match stream.try_clone() {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = events.send((session, Event::Failed(e.to_string())));
-                    return;
-                }
-            };
-            let (tx, rx) = mpsc::sync_channel(32);
-            if events
-                .send((session, Event::Connected(tx, stream)))
-                .is_err()
-            {
-                return;
-            }
-            thread::spawn(move || {
-                while let Ok(a) = rx.recv() {
-                    if outgoing.send(&mut writer, &a).is_err() {
-                        break;
-                    }
-                }
-                let _ = writer.shutdown(Shutdown::Both);
-            });
-            let mut reader = reader;
-            let reason = loop {
-                match incoming.receive::<Reply>(&mut reader, net::MAX_FRAME) {
-                    Ok(reply) => {
-                        if events.send((session, Event::Reply(reply))).is_err() {
-                            return;
-                        }
-                    }
-                    Err(e) => break e.to_string(),
-                }
-            };
-            let _ = events.send((session, Event::Failed(reason)));
-        });
+        connection::spawn(address, session, events);
     }
 }
 fn main() {
@@ -716,6 +617,10 @@ fn receive(mut c: ResMut<Client>) {
                 }
             }
             Event::Reply(Reply::State { view }) => {
+                let Ok(view) = visibility::filtered_view(&view) else {
+                    c.break_connection();
+                    continue;
+                };
                 if matches!(&view.phase, Phase::Finished { reason, .. } if reason == "Opponent disconnected")
                 {
                     c.break_connection();
@@ -753,8 +658,8 @@ fn receive(mut c: ResMut<Client>) {
                         .motion
                         .as_ref()
                         .filter(|event| {
-                            event.ply == view.ply
-                                && (event.elapsed_ms as f32) < motion_duration_ms(event)
+                            visibility::new_visible_motion(c.view.as_ref(), &view)
+                                && event.ply == view.ply
                         })
                         .cloned()
                         .map(|event| MovePlayback {
@@ -1823,7 +1728,13 @@ fn paint(
         c.error.clone()
     } else {
         match &v.phase {
-            Phase::Waiting => "Your game starts when the second player joins.".into(),
+            Phase::Waiting => format!(
+                "Main {}s · Delay {}s · Setup {}s · Quiet draw {} moves",
+                v.settings.main_time_seconds,
+                v.settings.turn_delay_seconds,
+                v.settings.placement_seconds,
+                v.settings.quiet_move_limit
+            ),
             Phase::Placement => {
                 if v.ready[v.you] || c.ready_sent {
                     "Both armies begin as soon as deployment is complete.".into()

@@ -1,0 +1,6 @@
+# Copy to config-ai.toml (ignored by Git) and supply your API key locally.
+hostname = "127.0.0.1"
+port = 4000
+game = "AI match"
+openai_api_key = "REPLACE_WITH_YOUR_OPENAI_API_KEY"
+model = "gpt-4.1-mini"

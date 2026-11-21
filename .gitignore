@@ -3,3 +3,6 @@
 
 # Local build-time shared authentication key; never commit.
 /.secrets/
+
+# Local AI configuration contains an OpenAI credential.
+/config-ai.toml

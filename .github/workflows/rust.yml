@@ -21,6 +21,17 @@ jobs:
       - run: python3 tools/generate_shared_key.py
       - run: cargo build --locked --bin mas-client
       - run: cargo test --locked --features network-tests --bin mas-client
+  ai-client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: python3 tools/generate_shared_key.py
+      - run: cargo build --locked --release --no-default-features --features ai-client --bin mas-ai-client
+      - run: cargo test --locked --no-default-features --features ai-client,network-tests
+      - run: cargo clippy --locked --no-default-features --features ai-client --all-targets -- -D warnings
   windows-client:
     runs-on: windows-latest
     env:

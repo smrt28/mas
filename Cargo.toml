@@ -6,6 +6,7 @@ edition = "2024"
 [features]
 default = ["client"]
 client = ["dep:bevy"]
+ai-client = ["dep:reqwest"]
 # Enables live TCP integration tests; needs permission to bind localhost sockets.
 network-tests = []
 
@@ -16,6 +17,7 @@ toml = "0.8"
 rand = "0.9"
 hmac = "0.12"
 sha2 = "0.10"
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["blocking", "json", "rustls-tls"] }
 bevy = { version = "0.18.1", optional = true, default-features = false, features = ["std", "async_executor", "bevy_asset", "bevy_color", "bevy_core_pipeline", "bevy_image", "bevy_render", "bevy_camera", "bevy_shader", "bevy_mesh", "bevy_sprite", "bevy_sprite_render", "bevy_text", "bevy_window", "bevy_winit", "default_font", "multi_threaded", "png", "x11", "wayland"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -25,6 +27,11 @@ seccompiler = { version = "0.5", default-features = false }
 [[bin]]
 name = "mas-server"
 path = "src/bin/server.rs"
+
+[[bin]]
+name = "mas-ai-client"
+path = "src/bin/ai_client.rs"
+required-features = ["ai-client"]
 
 [[bin]]
 name = "mas-client"
