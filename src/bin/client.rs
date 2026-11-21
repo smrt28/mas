@@ -110,8 +110,15 @@ fn client_window(preview: bool) -> Window {
 }
 #[derive(Component)]
 struct Painted;
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+enum Clock {
+    Yours,
+    Opponent,
+    Delay,
+    Setup,
+}
 #[derive(Component)]
-struct Clock;
+struct ActiveClock;
 #[derive(Component)]
 struct ReserveCount;
 #[derive(Component)]
@@ -891,6 +898,10 @@ fn input(
         }
         return;
     }
+    if clicked && v.can_claim_victory() && claim_button(surface.layout).contains(point) {
+        c.send(Action::ClaimVictory { turn_id: v.ply });
+        return;
+    }
     if c.motion.is_some() {
         return;
     }
@@ -1138,6 +1149,85 @@ fn count_label(
         Transform::from_xyz(point.x, point.y, 8.),
     ))
     .id()
+}
+fn clock_panels(cmd: &mut Commands, art: &Art, view: &View, layout: plan::Layout) {
+    let top = layout.height / 2.;
+    let width = layout.width / 3.;
+    let playing = matches!(view.phase, Phase::Playing);
+    for (i, role) in [Clock::Yours, Clock::Opponent, Clock::Delay]
+        .into_iter()
+        .enumerate()
+    {
+        let left = -layout.width / 2. + i as f32 * width;
+        let active = playing
+            && match role {
+                Clock::Yours => view.turn == view.you,
+                Clock::Opponent => view.turn != view.you,
+                _ => false,
+            };
+        let panel = cmd
+            .spawn((
+                Painted,
+                Sprite::from_color(
+                    if active {
+                        Color::srgb(0.08, 0.30, 0.40)
+                    } else {
+                        Color::srgb(0.10, 0.13, 0.15)
+                    },
+                    Vec2::new(width - 4., 44.),
+                ),
+                Transform::from_xyz(left + width / 2., top - 24., 6.),
+            ))
+            .id();
+        if active {
+            cmd.entity(panel).insert(ActiveClock);
+        }
+        let caption = match role {
+            Clock::Yours => "Your time",
+            Clock::Opponent => "Opponent's time",
+            Clock::Delay if playing && view.turn == view.you => "Turn delay · you",
+            Clock::Delay if playing => "Turn delay · opp.",
+            _ => "Turn delay",
+        };
+        label(
+            cmd,
+            art,
+            caption,
+            left + 8.,
+            top - 12.,
+            10.,
+            Color::srgb(0.85, 0.89, 0.91),
+        );
+        cmd.spawn((
+            Painted,
+            role,
+            Text2d::new(""),
+            TextFont {
+                font: if active {
+                    art.bold_font.clone()
+                } else {
+                    art.font.clone()
+                },
+                font_size: 22.,
+                ..default()
+            },
+            TextColor(if active {
+                Color::srgb(0.45, 0.91, 1.)
+            } else {
+                Color::WHITE
+            }),
+            Anchor::CENTER_LEFT,
+            Transform::from_xyz(left + 8., top - 32., 8.),
+        ));
+    }
+}
+fn claim_button(layout: plan::Layout) -> plan::Rect {
+    plan::Rect {
+        left: layout.width / 2. - 148.,
+        top: layout.height / 2. - 80.,
+        width: 136.,
+        height: 32.,
+    }
 }
 fn paint(
     mut cmd: Commands,
@@ -1556,6 +1646,7 @@ fn paint(
         5.,
         Color::srgb(0.07, 0.085, 0.085),
     );
+    clock_panels(&mut cmd, &art, v, layout);
     if let Some(result) = flag_result(v) {
         let button = result_ok(layout);
         let center = button.center();
@@ -1646,21 +1737,34 @@ fn paint(
             Phase::Finished { reason, .. } => reason.clone(),
         }
     };
+    let reserved = if v.can_claim_victory() {
+        160.
+    } else if matches!(v.phase, Phase::Placement) {
+        136.
+    } else {
+        12.
+    };
     label(
         &mut cmd,
         &art,
-        shortened(&status, ((layout.width - 120.) / 7.).max(8.) as usize),
+        shortened(
+            &status,
+            ((layout.width - reserved - 24.) / 7.).max(8.) as usize,
+        ),
         -layout.width / 2. + 12.,
-        top - 11.,
-        13.,
+        top - 58.,
+        12.,
         ink,
     );
     label(
         &mut cmd,
         &art,
-        shortened(&detail, ((layout.width - 120.) / 6.).max(8.) as usize),
+        shortened(
+            &detail,
+            ((layout.width - reserved - 24.) / 6.).max(8.) as usize,
+        ),
         -layout.width / 2. + 12.,
-        top - 29.,
+        top - 75.,
         11.,
         if c.error.is_empty() {
             Color::srgb(0.76, 0.78, 0.72)
@@ -1668,28 +1772,46 @@ fn paint(
             gold
         },
     );
-    label(
-        &mut cmd,
-        &art,
-        "YOUR TIME",
-        layout.width / 2. - 80.,
-        top - 9.,
-        8.,
-        ink,
-    );
-    cmd.spawn((
-        Painted,
-        Clock,
-        Text2d::new(""),
-        TextFont {
-            font: art.font.clone(),
-            font_size: 18.,
-            ..default()
-        },
-        TextColor(gold),
-        Anchor::CENTER_RIGHT,
-        Transform::from_xyz(layout.width / 2. - 12., top - 26., 8.),
-    ));
+    if matches!(v.phase, Phase::Placement) {
+        cmd.spawn((
+            Painted,
+            Clock::Setup,
+            Text2d::new(""),
+            TextFont {
+                font: art.font.clone(),
+                font_size: 13.,
+                ..default()
+            },
+            TextColor(gold),
+            Anchor::CENTER_RIGHT,
+            Transform::from_xyz(layout.width / 2. - 12., top - 58., 8.),
+        ));
+    }
+    if v.can_claim_victory() {
+        let button = claim_button(layout);
+        let center = button.center();
+        rect(
+            &mut cmd,
+            center.x,
+            center.y,
+            button.width,
+            button.height,
+            6.,
+            Color::srgb(0.12, 0.34, 0.63),
+        );
+        cmd.spawn((
+            Painted,
+            Text2d::new("Claim victory"),
+            TextFont {
+                font: art.bold_font.clone(),
+                font_size: 14.,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            Anchor::CENTER,
+            Transform::from_xyz(center.x, center.y, 8.),
+        ));
+    }
     if c.broken {
         broken_dialog(&mut cmd, &art, layout);
     }
@@ -1699,18 +1821,20 @@ fn flag_result(view: &View) -> Option<&'static str> {
         Phase::Finished {
             winner: Some(winner),
             reason,
-        } if reason == "Enemy flag captured" => Some(if *winner == view.you {
-            "You win!"
-        } else {
-            "You lose!"
-        }),
+        } if reason == "Enemy flag captured" || reason == "Victory claimed on time" => {
+            Some(if *winner == view.you {
+                "You win!"
+            } else {
+                "You lose!"
+            })
+        }
         _ => None,
     }
 }
 fn result_ok(layout: plan::Layout) -> plan::Rect {
     plan::Rect {
         left: layout.width / 2. - 76.,
-        top: layout.height / 2. - 36.,
+        top: layout.height / 2. - 80.,
         width: 64.,
         height: 32.,
     }
@@ -1770,24 +1894,31 @@ fn broken_dialog(cmd: &mut Commands, art: &Art, layout: plan::Layout) {
         ));
     }
 }
-fn clock_text(c: Res<Client>, mut texts: Query<&mut Text2d, With<Clock>>) {
+fn format_main_time(ms: u64) -> String {
+    let tenths = ms.div_ceil(100);
+    format!("{}:{:02}.{}", tenths / 600, (tenths / 10) % 60, tenths % 10)
+}
+fn clock_text(c: Res<Client>, mut texts: Query<(&Clock, &mut Text2d)>) {
     if let Some(v) = &c.view {
-        let remaining = v
-            .remaining_ms
-            .saturating_sub(c.received.elapsed().as_millis() as u64);
-        let running = !c.broken
-            && (matches!(v.phase, Phase::Placement)
-                || matches!(v.phase, Phase::Playing) && v.turn == v.you);
-        for mut text in &mut texts {
-            text.0 = if running {
-                format!(
-                    "{:02}:{:02}.{}",
-                    remaining / 60000,
-                    (remaining / 1000) % 60,
-                    (remaining / 100) % 10
-                )
-            } else {
-                "—".into()
+        let elapsed = if c.broken {
+            0
+        } else {
+            c.received.elapsed().as_millis() as u64
+        };
+        let clocks = v.clock_after(elapsed);
+        for (role, mut text) in &mut texts {
+            text.0 = match role {
+                Clock::Yours => format_main_time(clocks.main_ms[v.you]),
+                Clock::Opponent => format_main_time(clocks.main_ms[1 - v.you]),
+                Clock::Delay if matches!(v.phase, Phase::Playing) => {
+                    let tenths = clocks.delay_ms.div_ceil(100);
+                    format!("{}.{:01}s", tenths / 10, tenths % 10)
+                }
+                Clock::Delay => "—".into(),
+                Clock::Setup => format!(
+                    "Setup {}",
+                    format_main_time(v.remaining_ms.saturating_sub(elapsed))
+                ),
             };
         }
     }
@@ -2677,10 +2808,30 @@ mod tests {
                         );
                     }
                     assert_eq!((sheets, bars), (1, 1));
-                    let mut clocks = app.world_mut().query_filtered::<&Transform, With<Clock>>();
-                    let clock = clocks.single(app.world()).unwrap();
-                    assert_eq!(clock.translation.x, layout.width / 2. - 12.);
-                    assert_eq!(clock.translation.y, layout.height / 2. - 26.);
+                    let mut clocks = app.world_mut().query::<(&Clock, &Transform)>();
+                    let clocks: Vec<_> = clocks.iter(app.world()).collect();
+                    assert_eq!(
+                        clocks.len(),
+                        if matches!(
+                            app.world()
+                                .resource::<Client>()
+                                .view
+                                .as_ref()
+                                .unwrap()
+                                .phase,
+                            Phase::Placement
+                        ) {
+                            4
+                        } else {
+                            3
+                        }
+                    );
+                    for (role, clock) in clocks {
+                        assert_eq!(
+                            clock.translation.y,
+                            layout.height / 2. - if *role == Clock::Setup { 58. } else { 32. }
+                        );
+                    }
                     let count = app.world().entities().len();
                     app.update();
                     assert_eq!(app.world().entities().len(), count);
@@ -2979,38 +3130,182 @@ mod tests {
         }
     }
     #[test]
-    fn time_bar_counts_only_setup_and_the_players_own_turn() {
-        let (mut client, _, _) = fixture();
-        let cfg = Config::default();
-        let mut game = Game::new(0, &cfg);
-        game.start(0, &cfg);
-        client.view = Some(game.view(0, "test", 0));
-        let mut app = App::new();
-        app.insert_resource(client).add_systems(Update, clock_text);
-        let clock = app.world_mut().spawn((Clock, Text2d::new(""))).id();
-        for (phase, turn, running) in [
-            (Phase::Placement, 0, true),
-            (Phase::Playing, 0, true),
-            (Phase::Playing, 1, false),
-            (Phase::Waiting, 0, false),
-            (
-                Phase::Finished {
-                    winner: None,
-                    reason: "Draw".into(),
-                },
-                0,
-                false,
-            ),
-        ] {
-            game.phase = phase;
-            game.turn = turn;
-            game.deadline = 5000;
-            app.world_mut().resource_mut::<Client>().view = Some(game.view(0, "test", 0));
-            app.update();
-            let text = &app.world().get::<Text2d>(clock).unwrap().0;
-            assert_eq!(text != "—", running);
-            if running {
-                assert!(text.starts_with("00:0"));
+    fn clocks_highlight_the_active_player_and_claim_button_is_opponent_only_and_turn_bound() {
+        for (w, h) in [(360., 480.), (600., 925.), (1200., 900.), (400., 1600.)] {
+            for you in 0..2 {
+                for turn in 0..2 {
+                    let cfg = Config::default();
+                    let mut game = Game::new(0, &cfg);
+                    game.phase = Phase::Playing;
+                    game.turn = turn;
+                    game.ply = 17;
+                    let (mut client, _, actions) = fixture();
+                    let mut view = game.view(you, "clocks", 0);
+                    view.clocks.main_ms[turn] = 0;
+                    view.clocks.delay_ms = 0;
+                    view.clocks.claimable = true;
+                    client.view = Some(view.clone());
+                    let layout = plan::Layout::new(w, h);
+                    let mut app = App::new();
+                    app.insert_resource(client)
+                        .insert_resource(Surface {
+                            layout,
+                            playing: Some(true),
+                        })
+                        .init_resource::<ButtonInput<KeyCode>>()
+                        .init_resource::<ButtonInput<MouseButton>>()
+                        .add_message::<KeyboardInput>()
+                        .insert_resource(Art {
+                            font: default(),
+                            bold_font: default(),
+                            ranks: vec![Handle::default(); 11],
+                            board: default(),
+                            cover: default(),
+                        })
+                        .add_systems(Update, (input, paint, clock_text).chain());
+                    let window = app
+                        .world_mut()
+                        .spawn(Window {
+                            resolution: (w as u32, h as u32).into(),
+                            ..default()
+                        })
+                        .id();
+                    app.update();
+                    let mut labels = app.world_mut().query::<&Text2d>();
+                    assert!(labels.iter(app.world()).any(|text| text.0 == "Your time"));
+                    assert!(
+                        labels
+                            .iter(app.world())
+                            .any(|text| text.0 == "Opponent's time")
+                    );
+                    let delay_label = if turn == you {
+                        "Turn delay · you"
+                    } else {
+                        "Turn delay · opp."
+                    };
+                    assert!(labels.iter(app.world()).any(|text| text.0 == delay_label));
+                    assert_eq!(
+                        labels
+                            .iter(app.world())
+                            .any(|text| text.0 == "Claim victory"),
+                        turn != you
+                    );
+                    let mut highlights = app
+                        .world_mut()
+                        .query_filtered::<&Transform, With<ActiveClock>>();
+                    let active = highlights.single(app.world()).unwrap();
+                    assert!(
+                        (active.translation.x - if turn == you { -w / 3. } else { 0. }).abs()
+                            < 0.001
+                    );
+                    let point = claim_button(layout).center();
+                    assert!(layout.in_bar(point));
+                    app.world_mut()
+                        .get_mut::<Window>(window)
+                        .unwrap()
+                        .set_cursor_position(Some(Vec2::new(point.x + w / 2., h / 2. - point.y)));
+                    app.world_mut()
+                        .resource_mut::<ButtonInput<MouseButton>>()
+                        .press(MouseButton::Left);
+                    app.update();
+                    if turn != you {
+                        assert_eq!(
+                            actions.try_recv().unwrap(),
+                            Action::ClaimVictory { turn_id: 17 }
+                        );
+                    } else {
+                        assert!(actions.try_recv().is_err());
+                    }
+                    // A fresh authoritative turn removes the old button even if
+                    // the new active player also has no main time remaining.
+                    view.turn = 1 - turn;
+                    view.ply = 18;
+                    view.clocks.delay_ms = 10_000;
+                    view.clocks.claimable = false;
+                    {
+                        let mut client = app.world_mut().resource_mut::<Client>();
+                        client.view = Some(view);
+                        client.dirty = true;
+                        client.received = Instant::now();
+                    }
+                    app.insert_resource(ButtonInput::<MouseButton>::default());
+                    app.world_mut()
+                        .resource_mut::<ButtonInput<MouseButton>>()
+                        .press(MouseButton::Left);
+                    app.update();
+                    assert!(actions.try_recv().is_err());
+                    assert!(
+                        !labels
+                            .iter(app.world())
+                            .any(|text| text.0 == "Claim victory")
+                    );
+                    let mut sprites = app.world_mut().query::<(&Sprite, &Transform)>();
+                    for (sprite, transform) in sprites.iter(app.world()) {
+                        let size = sprite.custom_size.unwrap();
+                        assert!(transform.translation.x.abs() + size.x / 2. <= w / 2. + 0.01);
+                        assert!(transform.translation.y.abs() + size.y / 2. <= h / 2. + 0.01);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn time_bar_interpolates_both_main_clocks_and_delay_from_server_state() {
+        for you in 0..2 {
+            for turn in 0..2 {
+                let cfg = Config::default();
+                let mut game = Game::new(0, &cfg);
+                game.phase = Phase::Playing;
+                game.turn = turn;
+                let (mut client, _, _) = fixture();
+                let mut view = game.view(you, "clock", 0);
+                view.clocks.main_ms = [90_000, 120_000];
+                view.clocks.delay_ms = 500;
+                client.view = Some(view);
+                client.received = Instant::now() - Duration::from_millis(1500);
+                let mut app = App::new();
+                app.insert_resource(client).add_systems(Update, clock_text);
+                let yours = app.world_mut().spawn((Clock::Yours, Text2d::new(""))).id();
+                let opponent = app
+                    .world_mut()
+                    .spawn((Clock::Opponent, Text2d::new("")))
+                    .id();
+                let delay = app.world_mut().spawn((Clock::Delay, Text2d::new(""))).id();
+                app.update();
+                let elapsed = app
+                    .world()
+                    .resource::<Client>()
+                    .received
+                    .elapsed()
+                    .as_millis() as u64;
+                let clocks = app
+                    .world()
+                    .resource::<Client>()
+                    .view
+                    .as_ref()
+                    .unwrap()
+                    .clock_after(elapsed);
+                let yours_ms = clocks.main_ms[you];
+                let opponent_ms = clocks.main_ms[1 - you];
+                // The inactive clock is unchanged; only the active main clock
+                // pays the elapsed portion beyond the snapshot's 500ms delay.
+                assert_eq!(
+                    app.world().get::<Text2d>(yours).unwrap().0,
+                    format_main_time(yours_ms)
+                );
+                assert_eq!(
+                    app.world().get::<Text2d>(opponent).unwrap().0,
+                    format_main_time(opponent_ms)
+                );
+                assert_eq!(app.world().get::<Text2d>(delay).unwrap().0, "0.0s");
+                assert_eq!(clocks.main_ms[1 - turn], [90_000, 120_000][1 - turn]);
+                assert!(clocks.main_ms[turn] <= [89_000, 119_000][turn]);
+                app.world_mut().resource_mut::<Client>().broken = true;
+                app.update();
+                assert_eq!(
+                    app.world().get::<Text2d>(yours).unwrap().0,
+                    format_main_time([90_000, 120_000][you])
+                );
             }
         }
     }

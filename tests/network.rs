@@ -63,6 +63,18 @@ impl Player {
             }
         }
     }
+    fn until_error(&mut self) -> String {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "Timed out waiting for claim rejection"
+            );
+            if let Reply::Error { message } = self.reply() {
+                return message;
+            }
+        }
+    }
     fn join(&mut self, name: &str) {
         self.send(Action::Join { game: name.into() });
     }
@@ -180,7 +192,7 @@ fn tcp_matchmaking_privacy_moves_timeouts_and_disconnects() {
         .unwrap()
         .port();
     let config = std::env::temp_dir().join(format!("mas-network-{}.toml", std::process::id()));
-    fs::write(&config,format!("bind = \"127.0.0.1:{port}\"\nplacement_seconds = 3\nmove_seconds = 2\nmax_missed_turns = 1\n")).unwrap();
+    fs::write(&config,format!("bind = \"127.0.0.1:{port}\"\nplacement_seconds = 3\nturn_delay_seconds = 1\nmain_time_seconds = 1\n")).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_mas-server"))
         .arg(&config)
         .stdout(Stdio::null())
@@ -329,15 +341,61 @@ fn tcp_matchmaking_privacy_moves_timeouts_and_disconnects() {
             assert!(!first.piece_lost && !second.piece_lost);
         }
     }
-    // The server independently enforces the configured two-second turn limit.
+    // Expiry leaves play active and makes the current turn claimable.
+    let expired = a.until(|v| matches!(v.phase, Phase::Playing) && v.clocks.claimable);
+    let active = expired.turn;
+    let active_view = if active == 0 {
+        expired.clone()
+    } else {
+        b.until(|v| v.ply == expired.ply && v.clocks.claimable)
+    };
+    assert_eq!(active_view.clocks.main_ms[active], 0);
+    assert_eq!(active_view.clocks.delay_ms, 0);
+    let (from, to) = (0..CELLS)
+        .find_map(|from| {
+            active_view
+                .legal_targets(from)
+                .first()
+                .copied()
+                .map(|to| (from, to))
+        })
+        .unwrap();
+    if active == 0 {
+        a.send(Action::Move { from, to });
+    } else {
+        b.send(Action::Move { from, to });
+    }
+    let next = a.until(|v| v.ply == expired.ply + 1);
+    b.until(|v| v.ply == expired.ply + 1);
+    assert!(!next.clocks.claimable);
+    assert_eq!(next.clocks.main_ms[active], 0);
+    // A previously displayed claim may arrive after the legal move. It cannot
+    // affect the new turn, even though its sender is still authenticated.
+    let stale = Action::ClaimVictory {
+        turn_id: expired.ply,
+    };
+    if active == 0 {
+        b.send(stale);
+        assert!(b.until_error().contains("current turn"));
+    } else {
+        a.send(stale);
+        assert!(a.until_error().contains("current turn"));
+    }
+    let expired_next = a.until(|v| v.ply == next.ply && v.clocks.claimable);
+    let claimant = 1 - expired_next.turn;
+    let action = Action::ClaimVictory {
+        turn_id: expired_next.ply,
+    };
+    if claimant == 0 {
+        a.send(action);
+    } else {
+        b.send(action);
+    }
     let end = a.until(|v| matches!(v.phase, Phase::Finished { .. }));
-    assert!(matches!(
-        end.phase,
-        Phase::Finished {
-            winner: Some(_),
-            ..
-        }
-    ));
+    assert!(
+        matches!(end.phase, Phase::Finished { winner: Some(winner), ref reason }
+        if winner == claimant && reason == "Victory claimed on time")
+    );
     drop(a);
     drop(b);
     // Independent room still works. A disconnect ends only its own match.

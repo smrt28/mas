@@ -58,8 +58,8 @@ fn independent_room_clocks_and_custom_limits() {
     let mut s = Sessions::default();
     let cfg = Config {
         placement_seconds: 2,
-        move_seconds: 1,
-        max_missed_turns: 1,
+        turn_delay_seconds: 1,
+        main_time_seconds: 1,
         ..Default::default()
     };
     for (id, name, now) in [(0, "a", 0), (1, "a", 0), (2, "b", 500), (3, "b", 500)] {
@@ -70,12 +70,29 @@ fn independent_room_clocks_and_custom_limits() {
     assert_eq!(s.view(2, 2000).unwrap().phase, Phase::Placement);
     s.tick(2500, &cfg);
     assert_eq!(s.view(2, 2500).unwrap().phase, Phase::Playing);
-    s.tick(3000, &cfg);
+    s.tick(4000, &cfg);
+    let first = s.view(0, 4000).unwrap();
+    let second = s.view(2, 4000).unwrap();
+    assert_eq!(first.phase, Phase::Playing);
+    assert!(first.clocks.claimable);
+    assert!(!second.clocks.claimable);
+    assert_eq!(second.clocks.main_ms[second.turn], 500);
+    let claimant = 1 - first.turn as u64;
+    s.command(
+        claimant,
+        Action::ClaimVictory { turn_id: first.ply },
+        4000,
+        &cfg,
+    )
+    .unwrap();
     assert!(matches!(
-        s.view(0, 3000).unwrap().phase,
-        Phase::Finished { .. }
+        s.view(0, 4000).unwrap().phase,
+        Phase::Finished {
+            winner: Some(_),
+            ..
+        }
     ));
-    assert_eq!(s.view(2, 3000).unwrap().phase, Phase::Playing);
+    assert_eq!(s.view(2, 4000).unwrap().phase, Phase::Playing);
 }
 #[test]
 fn invalid_names_and_limits_do_not_allocate_rooms() {

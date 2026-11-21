@@ -282,47 +282,19 @@ fn any_mobile_piece_captures_flag() {
 }
 #[test]
 fn invalid_moves_cannot_reset_clock() {
-    let (mut g, cfg) = sparse();
-    let before = g.deadline;
+    let (mut game, cfg) = sparse();
     assert!(
-        g.apply(0, Action::Move { from: CELLS, to: 0 }, 100, &cfg)
+        game.apply(0, Action::Move { from: CELLS, to: 0 }, 100, &cfg)
             .is_err()
     );
-    assert_eq!(g.deadline, before);
+    assert_eq!(game.view(0, "clock", 100).clocks.delay_ms, 9900);
     assert!(
-        g.apply(1, Action::Move { from: 9, to: 8 }, 200, &cfg)
+        game.apply(1, Action::Move { from: 9, to: 8 }, 200, &cfg)
             .is_err()
     );
-    assert_eq!(g.deadline, before);
-}
-#[test]
-fn deadline_is_enforced_even_before_a_tick() {
-    let (mut g, cfg) = sparse();
-    assert!(
-        g.apply(0, Action::Move { from: 90, to: 80 }, 5000, &cfg)
-            .is_err()
-    );
-    assert_eq!(g.turn, 1);
-    assert_eq!(g.missed, [1, 0]);
-    assert_eq!(g.board[90].unwrap().owner, 0);
-}
-#[test]
-fn consecutive_misses_lose_and_valid_move_resets_counter() {
-    let (mut g, cfg) = sparse();
-    g.missed[0] = 2;
-    g.apply(0, Action::Move { from: 90, to: 80 }, 1, &cfg)
-        .unwrap();
-    assert_eq!(g.missed[0], 0);
-    for now in [5001, 10001, 15001, 20001, 25001] {
-        g.tick(now, &cfg);
-    }
-    assert!(matches!(
-        g.phase,
-        Phase::Finished {
-            winner: Some(0),
-            ..
-        }
-    ));
+    assert_eq!(game.view(0, "clock", 200).clocks.delay_ms, 9800);
+    assert_eq!(game.view(0, "clock", 200).clocks.main_ms, [180_000; 2]);
+    assert_eq!(game.turn, 0);
 }
 #[test]
 fn no_mobile_pieces_is_a_draw_not_a_loss() {
@@ -357,11 +329,16 @@ fn frame_size_is_bounded_and_eof_detected() {
 fn config_rejects_zero_and_unbounded_clocks() {
     let mut cfg = Config::default();
     assert!(cfg.validate().is_ok());
-    cfg.move_seconds = 0;
+    cfg.main_time_seconds = 0;
     assert!(cfg.validate().is_err());
-    cfg.move_seconds = u64::MAX;
+    cfg.main_time_seconds = u64::MAX;
     assert!(cfg.validate().is_err());
-    assert!(toml::from_str::<Config>("move_second = 1").is_err());
+    cfg = Config::default();
+    cfg.turn_delay_seconds = 0;
+    assert!(cfg.validate().is_ok());
+    cfg.turn_delay_seconds = u64::MAX;
+    assert!(cfg.validate().is_err());
+    assert!(toml::from_str::<Config>("main_time_second = 1").is_err());
 }
 
 #[test]

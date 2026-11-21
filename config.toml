@@ -1,9 +1,10 @@
 # The server owns all clocks, rules, rooms and hidden ranks. Nothing is persisted.
 bind = "0.0.0.0:4000"
 placement_seconds = 5
-move_seconds = 10
-# Three consecutive missed turns lose the game.
-max_missed_turns = 15
+# Each turn pauses both main clocks for this delay.
+turn_delay_seconds = 10
+# Main time is per player and carries over between turns.
+main_time_seconds = 180
 # Draw after this many moves without a capture (prevents endless repetition).
 quiet_move_limit = 200
 max_rooms = 128

@@ -197,11 +197,11 @@ fn resized_sheet_preserves_exact_pdf_aspect_and_fits_below_fixed_bar() {
         }));
         assert!(layout.in_bar(Point {
             x: 0.,
-            y: h / 2. - 39.
+            y: h / 2. - plan::BAR_HEIGHT as f32 + 1.
         }));
         assert!(!layout.in_bar(Point {
             x: 0.,
-            y: h / 2. - 41.
+            y: h / 2. - plan::BAR_HEIGHT as f32 - 1.
         }));
     }
 }
