@@ -110,6 +110,18 @@ fn client_window(preview: bool) -> Window {
 }
 #[derive(Component)]
 struct Painted;
+#[derive(Component)]
+struct InputCaret(Instant);
+
+fn blink_input_caret(mut carets: Query<(&InputCaret, &mut TextColor)>) {
+    for (caret, mut color) in &mut carets {
+        color.0 = if caret.0.elapsed().as_millis() % 1000 < 500 {
+            Color::srgb(0.94, 0.88, 0.74)
+        } else {
+            Color::NONE
+        };
+    }
+}
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 enum Clock {
     Yours,
@@ -467,6 +479,7 @@ fn main() {
                 animate_motion,
                 input,
                 paint,
+                blink_input_caret,
                 clock_text,
                 screenshot,
             )
@@ -1000,7 +1013,7 @@ fn label(
     y: f32,
     size: f32,
     color: Color,
-) {
+) -> Entity {
     cmd.spawn((
         Painted,
         Text2d::new(s),
@@ -1012,7 +1025,8 @@ fn label(
         TextColor(color),
         Anchor::CENTER_LEFT,
         Transform::from_xyz(x, y, 8.),
-    ));
+    ))
+    .id()
 }
 fn border(cmd: &mut Commands, x: f32, y: f32, w: f32, h: f32, z: f32, color: Color) {
     border_with_stroke(cmd, x, y, w, h, z, color, w.min(h) / 25.);
@@ -1308,7 +1322,7 @@ fn paint(
             } else {
                 tail
             };
-            label(
+            let value_label = label(
                 &mut cmd,
                 &art,
                 display,
@@ -1317,6 +1331,20 @@ fn paint(
                 16. * scale,
                 ink,
             );
+            if c.field == i && !c.connecting {
+                cmd.entity(value_label).with_children(|parent| {
+                    parent.spawn((
+                        TextSpan::new("│"),
+                        TextFont {
+                            font: art.font.clone(),
+                            font_size: 16. * scale,
+                            ..default()
+                        },
+                        TextColor(ink),
+                        InputCaret(Instant::now()),
+                    ));
+                });
+            }
         }
         rect(
             &mut cmd,
