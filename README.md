@@ -109,6 +109,34 @@ cargo build --locked --release --no-default-features --features client --bin mas
 
 The native output is `target\release\mas-client.exe`. CI builds and tests the Windows client with a disposable test key; those builds do not use the distribution key. The embedded-asset test decodes every image and font with a deliberately missing filesystem asset directory.
 
+## Standalone Apple Silicon macOS client
+
+The macOS build targets [`aarch64-apple-darwin`](https://doc.rust-lang.org/rustc/platform-support/apple-darwin.html) for native execution on Apple M1 and later M-series chips, with macOS 11.0 as the minimum deployment target. All artwork and fonts use the same embedded assets as the Windows/Linux client. Only `mas-client` and its `client` feature are built; the server and AI client are excluded.
+
+On macOS, install Rust and Xcode Command Line Tools (`xcode-select --install`), provide the same `.secrets/multiplayer.key` (or `MAS_SHARED_KEY_FILE`) used by the game server, then run:
+
+```sh
+./tools/build_mac_client.sh
+```
+
+The script also runs on Intel Macs, while producing an arm64 binary. It installs the Rust Apple Silicon target when needed. Outputs:
+
+- `target/mac/mas-client` — standalone executable with embedded graphics/fonts/key.
+- `target/mac/Marsal a spion.app` — Finder-launchable application bundle.
+- `target/mac/mas-client-macos-arm64.zip` — ZIP containing the `.app`, for sharing.
+
+The executable and bundle are ad-hoc signed after building, with no Apple account needed. They are not Developer ID signed or notarized, so downloaded copies may require explicit approval in macOS Privacy & Security. The application needs no adjacent assets, fonts, configuration or key file. `MACOSX_DEPLOYMENT_TARGET` can raise the minimum supported macOS version; `CARGO_TARGET_DIR` can change the compilation cache directory, while packaged output stays under `target/mac/`.
+
+For a Linux cross-build, first install an arm64-capable [OSXCross toolchain and macOS SDK](https://github.com/tpoechtrager/osxcross), plus [`rcodesign`](https://gregoryszorc.com/docs/apple-codesign/stable/apple_codesign_rcodesign_signing.html) (`cargo install --locked apple-codesign`) and `zip`. Then run:
+
+```sh
+OSXCROSS_ROOT=/path/to/osxcross/target ./tools/build_mac_client.sh
+```
+
+`OSXCROSS_ROOT` may also point to the OSXCross source checkout containing `target/bin`. The SDK is discovered under the installation's `SDK/` directory, or can be selected with `SDKROOT=/path/to/MacOSX.sdk`. Unlike the Windows toolchain bootstrap, this script requires an existing Apple SDK/toolchain on Linux; it does not download an SDK automatically. Choose an SDK supporting Apple Silicon (macOS 11 or later).
+
+The macOS CI job compiles and verifies the arm64 application on a Mac runner; on arm64 runners it also runs the license smoke test and client unit tests. CI uses a disposable multiplayer key, so distribution builds still need the real matching server key. Script packaging tests (`python3 tests/build_mac_client.py`) exercise both native and Linux cross-build paths with mocked toolchains, including spaces in paths, repeat builds, executable ZIP permissions, and missing prerequisites. Those mocks do not substitute for a real macOS build or testing the game on Apple hardware.
+
 ## Server sandbox
 
 The server requires 64-bit Linux (x86_64, aarch64 or riscv64), Linux 5.9+ with seccomp filtering enabled. It reads and validates configuration and binds the listening socket first, then irreversibly drops filesystem access before accepting players. Startup fails if sandbox setup fails; there is no unsandboxed fallback or disable switch. The graphical client is unaffected.

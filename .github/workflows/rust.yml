@@ -10,6 +10,7 @@ jobs:
           components: rustfmt, clippy
       - run: python3 tools/generate_shared_key.py
       - run: cargo fmt --check
+      - run: python3 tests/build_mac_client.py
       - run: cargo test --locked --no-default-features --features network-tests
       - run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
   client:
@@ -32,6 +33,22 @@ jobs:
       - run: cargo build --locked --release --no-default-features --features ai-client --bin mas-ai-client
       - run: cargo test --locked --no-default-features --features ai-client,network-tests
       - run: cargo clippy --locked --no-default-features --features ai-client --all-targets -- -D warnings
+  mac-client:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Disposable CI key only; distribution builds use the server's shared key.
+      - run: python3 tools/generate_shared_key.py
+      - run: ./tools/build_mac_client.sh
+      - name: Verify Apple Silicon bundle
+        run: |
+          lipo -verify_arch arm64 target/mac/mas-client
+          codesign --verify --strict "target/mac/Marsal a spion.app"
+          if [[ "$(uname -m)" == arm64 ]]; then
+            ./target/mac/mas-client --licenses
+            cargo test --locked --target aarch64-apple-darwin --no-default-features --features client --bin mas-client
+          fi
   windows-client:
     runs-on: windows-latest
     env:
