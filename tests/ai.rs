@@ -68,7 +68,7 @@ fn extra_hidden_ranks_cannot_change_requests_actions_keys_or_memory() {
     }
 }
 #[test]
-fn deployment_hides_opponent_occupancy_and_counters_and_matches_public_settings() {
+fn deployment_shows_opponent_positions_but_hides_ranks_and_counters() {
     let cfg = Config {
         placement_seconds: 89,
         main_time_seconds: 99,
@@ -78,6 +78,16 @@ fn deployment_hides_opponent_occupancy_and_counters_and_matches_public_settings(
     };
     let mut game = Game::new(0, &cfg);
     game.start(0, &cfg);
+    game.apply(
+        1,
+        Action::Place {
+            at: 0,
+            rank: Rank::Flag,
+        },
+        0,
+        &cfg,
+    )
+    .unwrap();
     let raw = game.view(0, "deploy", 0);
     let mut clean = Observer::default();
     clean.observe(&raw).unwrap();
@@ -90,6 +100,22 @@ fn deployment_hides_opponent_occupancy_and_counters_and_matches_public_settings(
     ai.observe(&poisoned).unwrap();
     assert_eq!(encoded(&clean), encoded(&ai));
     let observation = ai.observation(0).unwrap();
+    assert_eq!(
+        observation.board[0].piece,
+        Some(ObservedPiece {
+            owner: 1,
+            rank: None
+        })
+    );
+    let pending = ai.decision(0).unwrap();
+    game.apply(1, Action::Remove { at: 0 }, 1, &cfg).unwrap();
+    ai.observe(&game.view(0, "deploy", 1)).unwrap();
+    assert!(ai.observation(0).unwrap().board[0].piece.is_none());
+    assert!(
+        ai.validate(&pending, 0).is_some(),
+        "opponent setup changes must not discard a still-legal paid decision"
+    );
+    assert!(ai.observation(0).unwrap().history.is_empty());
     assert_eq!(observation.settings, MatchSettings::from(&cfg));
     assert!(
         observation
@@ -345,4 +371,78 @@ fn live_animation_does_not_reveal_a_surviving_enemy_attacker_or_allow_early_inpu
     let mut observer = Observer::default();
     observer.observe(&hidden_message).unwrap();
     assert!(observer.observation(0).unwrap().history.is_empty());
+}
+
+#[test]
+fn compact_prompt_preserves_visible_board_counters_and_action_ids() {
+    let cfg = Config::default();
+    let mut game = Game::new(0, &cfg);
+    game.start(0, &cfg);
+    game.apply(0, Action::AutoPlace, 0, &cfg).unwrap();
+    game.apply(1, Action::AutoPlace, 0, &cfg).unwrap();
+    game.phase = Phase::Playing;
+    game.turn = 0;
+    let mut observer = Observer::default();
+    observer.observe(&game.view(0, "compact", 0)).unwrap();
+    let decision = observer.decision(0).unwrap();
+    let prompt = decision.prompt();
+    for cell in &decision.observation.board {
+        let compact = &prompt["observation"]["board"][cell.index];
+        if cell.blocked {
+            assert_eq!(compact, "#");
+        } else if let Some(piece) = &cell.piece {
+            assert_eq!(compact[0], piece.owner);
+            assert_eq!(
+                compact[1],
+                serde_json::json!(piece.rank.map(|r| r as usize))
+            );
+        } else {
+            assert!(compact.is_null());
+        }
+    }
+    for (index, counter) in decision.observation.counters.iter().enumerate() {
+        let compact = &prompt["observation"]["counters"][index];
+        assert_eq!(compact[0], counter.owner);
+        assert_eq!(compact[1], counter.rank as usize);
+        assert_eq!(compact[2], serde_json::to_value(&counter.count).unwrap());
+    }
+    for (index, choice) in decision.actions.iter().enumerate() {
+        assert_eq!(prompt["actions"][index][0], choice.id);
+        if let Action::Move { from, to } = choice.action {
+            assert_eq!(
+                prompt["actions"][index],
+                serde_json::json!([choice.id, "m", from, to])
+            );
+        }
+    }
+    let instructions = prompt_instructions();
+    assert!(instructions.contains(RULES));
+    for rank in Rank::ALL {
+        assert!(instructions.contains(rank.name()));
+    }
+    assert!(prompt["observation"].get("rules").is_none());
+    assert!(prompt["observation"].get("inventory").is_none());
+    assert_eq!(
+        prompt["observation"]["settings"],
+        serde_json::to_value(&decision.observation.settings).unwrap()
+    );
+}
+#[test]
+fn forced_readiness_and_claims_skip_llm_but_resignation_never_does() {
+    let mut observer = Observer::default();
+    observer.observe(&playing()).unwrap();
+    let mut decision = observer.decision(0).unwrap();
+    assert!(decision.automatic_action().is_none());
+    for action in [Action::Ready, Action::ClaimVictory { turn_id: 8 }] {
+        decision.actions = vec![Choice {
+            id: 0,
+            action: action.clone(),
+        }];
+        assert_eq!(decision.automatic_action(), Some(action));
+    }
+    decision.actions = vec![Choice {
+        id: 0,
+        action: Action::Resign,
+    }];
+    assert!(decision.automatic_action().is_none());
 }

@@ -4,6 +4,10 @@ port = 4000
 game = "AI match"
 openai_api_key = "REPLACE_WITH_YOUR_OPENAI_API_KEY"
 model = "gpt-4.1-mini"
+# OpenAI output limit includes internal reasoning tokens. Range: 64..32768.
+max_output_tokens = 4096
+# GPT-6 defaults to low reasoning; override only for a model that supports it.
+# reasoning_effort = "low"
 
 # Set the top-level model = "local" to select this provider.
 # baseUrl includes the API prefix; /chat/completions is appended automatically.

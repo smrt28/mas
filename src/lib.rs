@@ -539,7 +539,7 @@ impl Game {
                 .iter()
                 .map(|cell| {
                     cell.and_then(|v| {
-                        if placement && v.owner != p {
+                        if matches!(self.phase, Phase::Waiting) && v.owner != p {
                             None
                         } else {
                             Some(VisiblePiece {

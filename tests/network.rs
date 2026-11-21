@@ -260,6 +260,14 @@ fn tcp_matchmaking_privacy_moves_timeouts_and_disconnects() {
         at: 70,
         rank: Rank::Marshal,
     });
+    let preparation = b.until(|v| matches!(v.phase, Phase::Placement) && v.board[70].is_some());
+    assert!(preparation.board[70].as_ref().unwrap().rank.is_none());
+    a.send(Action::Remove { at: 70 });
+    b.until(|v| matches!(v.phase, Phase::Placement) && v.board[70].is_none());
+    a.send(Action::Place {
+        at: 70,
+        rank: Rank::Marshal,
+    });
     a.send(Action::AutoPlace);
     a.send(Action::Ready);
     let av = a.until(|v| v.ready[0]);

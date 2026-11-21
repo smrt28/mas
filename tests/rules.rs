@@ -119,21 +119,37 @@ fn timeout_preserves_placement_and_fills_both_armies() {
     assert_eq!(g.board[CELLS - 1].unwrap().rank, Rank::Flag);
 }
 #[test]
-fn setup_is_private_on_wire() {
+fn setup_positions_are_public_but_ranks_are_private_on_wire() {
     let cfg = Config::default();
     let mut g = Game::new(0, &cfg);
     g.start(0, &cfg);
     g.apply(0, Action::AutoPlace, 0, &cfg).unwrap();
     g.apply(1, Action::AutoPlace, 0, &cfg).unwrap();
     let v = g.view(0, "secret", 0);
-    assert_eq!(v.board.iter().flatten().count(), 40);
-    assert!(v.board.iter().flatten().all(|p| p.owner == 0));
+    assert_eq!(v.board.iter().flatten().count(), 80);
+    assert!(
+        v.board
+            .iter()
+            .flatten()
+            .filter(|p| p.owner == 0)
+            .all(|p| p.rank.is_some())
+    );
+    assert!(
+        v.board
+            .iter()
+            .flatten()
+            .filter(|p| p.owner == 1)
+            .all(|p| p.rank.is_none())
+    );
     let reply = serde_json::to_string(&Reply::State { view: v }).unwrap();
     let parsed: Reply = serde_json::from_str(&reply).unwrap();
     let Reply::State { view } = parsed else {
         panic!()
     };
-    assert!(view.board[..40].iter().all(Option::is_none));
+    assert!(view.board[..40].iter().all(|cell| {
+        cell.as_ref()
+            .is_some_and(|p| p.owner == 1 && p.rank.is_none())
+    }));
     g.phase = Phase::Playing;
     let v = g.view(0, "secret", 0);
     assert_eq!(v.board.iter().flatten().count(), 80);

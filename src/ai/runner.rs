@@ -148,6 +148,18 @@ fn run_with(config: AiConfig, api: Arc<Decide>) -> Result<(), &'static str> {
             && Instant::now() >= retry_at
             && let Some(decision) = current
         {
+            if decision.automatic_action().is_some()
+                && let Some(action) = observer.validate(&decision, 0)
+            {
+                actions
+                    .as_ref()
+                    .ok_or("Game is disconnected")?
+                    .try_send(action)
+                    .map_err(|_| "Game connection busy or closed")?;
+                sent = Some((decision.key, Instant::now()));
+                println!("Only one interface action is available; sent without an LLM request.");
+                continue;
+            }
             let worker_api = api.clone();
             let answers = answers_tx.clone();
             let pending = decision.clone();
@@ -283,7 +295,7 @@ mod tests {
         });
         assert_eq!(run_with(config(port), chooser), Ok(()));
         server.join().unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 42);
+        assert_eq!(calls.load(Ordering::SeqCst), 41);
     }
     #[test]
     fn pending_responses_expire_and_invalid_current_answers_retry() {

@@ -23,7 +23,7 @@ pub fn filtered_view(raw: &View) -> Result<View, &'static str> {
     let finished = matches!(view.phase, Phase::Finished { .. });
     for cell in &mut view.board {
         if let Some(piece) = cell {
-            if piece.owner != view.you && matches!(view.phase, Phase::Placement | Phase::Waiting) {
+            if piece.owner != view.you && matches!(view.phase, Phase::Waiting) {
                 *cell = None;
             } else if piece.owner != view.you && !finished {
                 piece.rank = None;

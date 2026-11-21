@@ -1986,6 +1986,103 @@ fn screenshot(
 mod tests {
     use super::*;
     #[test]
+    fn preparation_shows_opponent_card_backs_and_removals_in_both_orientations() {
+        for you in 0..2 {
+            for (w, h) in [(360., 480.), (600., 925.), (1280., 900.)] {
+                let cfg = Config::default();
+                let mut game = Game::new(0, &cfg);
+                game.start(0, &cfg);
+                let at = |owner| if owner == 0 { 70 } else { 0 };
+                game.apply(
+                    you,
+                    Action::Place {
+                        at: at(you),
+                        rank: Rank::Miner,
+                    },
+                    0,
+                    &cfg,
+                )
+                .unwrap();
+                let (client, events, _) = fixture();
+                let mut images = Assets::<Image>::default();
+                let ranks: Vec<_> = Rank::ALL
+                    .iter()
+                    .map(|_| images.add(Image::default()))
+                    .collect();
+                let layout = plan::Layout::new(w, h);
+                let mut app = App::new();
+                app.insert_resource(client)
+                    .insert_resource(Surface {
+                        layout,
+                        playing: Some(true),
+                    })
+                    .insert_resource(Art {
+                        font: default(),
+                        bold_font: default(),
+                        ranks: ranks.clone(),
+                        board: default(),
+                        cover: default(),
+                    })
+                    .insert_resource(images)
+                    .add_systems(Update, (receive, paint).chain());
+                let enemy = 1 - you;
+                let point = layout.world(plan::cell(at(enemy)).center(), you);
+                for placed in [false, true, false] {
+                    if placed {
+                        game.apply(
+                            enemy,
+                            Action::Place {
+                                at: at(enemy),
+                                rank: Rank::Spy,
+                            },
+                            0,
+                            &cfg,
+                        )
+                        .unwrap();
+                    } else if game.board[at(enemy)].is_some() {
+                        game.apply(enemy, Action::Remove { at: at(enemy) }, 0, &cfg)
+                            .unwrap();
+                    }
+                    let mut view = game.view(you, "preparation", 0);
+                    if placed {
+                        assert!(view.board[at(enemy)].as_ref().unwrap().rank.is_none());
+                        // Defensive client filtering must also conceal an unsolicited rank.
+                        view.board[at(enemy)].as_mut().unwrap().rank = Some(Rank::Spy);
+                    }
+                    events
+                        .send((0, Event::Reply(Reply::State { view })))
+                        .unwrap();
+                    app.update();
+                    let mut sprites = app.world_mut().query::<(&Sprite, &Transform)>();
+                    assert_eq!(
+                        sprites
+                            .iter(app.world())
+                            .filter(|(sprite, _)| ranks.contains(&sprite.image))
+                            .count(),
+                        1,
+                        "only the player's own placed rank gets an icon"
+                    );
+                    let backs = sprites
+                        .iter(app.world())
+                        .filter(|(_, transform)| {
+                            (transform.translation.x - point.x).abs() < 0.01
+                                && (transform.translation.y - point.y).abs() < 0.01
+                                && transform.translation.z == 3.
+                        })
+                        .count();
+                    assert_eq!(backs, usize::from(placed));
+                    let view = app.world().resource::<Client>().view.as_ref().unwrap();
+                    assert_eq!(view.board[at(enemy)].is_some(), placed);
+                    assert!(
+                        view.board[at(enemy)]
+                            .as_ref()
+                            .is_none_or(|piece| piece.rank.is_none())
+                    );
+                }
+            }
+        }
+    }
+    #[test]
     fn server_addresses_default_to_4000_and_preserve_explicit_ports() {
         for (input, expected) in [
             ("localhost", "localhost:4000"),

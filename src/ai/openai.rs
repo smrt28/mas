@@ -1,9 +1,10 @@
-use super::Decision;
+use super::{Decision, prompt_instructions};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     io::{Read, Write},
     path::Path,
+    sync::Mutex,
     time::{Duration, Instant},
 };
 
@@ -18,7 +19,14 @@ pub struct AiConfig {
     openai_api_key: String,
     pub model: String,
     #[serde(default)]
+    reasoning_effort: Option<String>,
+    #[serde(default = "default_output_limit")]
+    max_output_tokens: u32,
+    #[serde(default)]
     local: Option<LocalConfig>,
+}
+fn default_output_limit() -> u32 {
+    4096
 }
 /// OpenAI-compatible private provider. No Debug/Serialize: apiKey is a secret.
 #[derive(Deserialize)]
@@ -59,6 +67,17 @@ impl AiConfig {
             || self.model.chars().any(char::is_control)
         {
             return Err("Invalid AI configuration values");
+        }
+        if self.max_output_tokens < 64
+            || self.max_output_tokens > 32768
+            || self.reasoning_effort.as_deref().is_some_and(|effort| {
+                !matches!(
+                    effort,
+                    "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+                )
+            })
+        {
+            return Err("Invalid AI output-token limit or reasoning effort");
         }
         if self.model == "local" {
             let local = self
@@ -123,6 +142,10 @@ pub struct LlmClient {
     api: Api,
     secrets: Vec<String>,
     request_timeout: Duration,
+    reasoning_effort: Option<String>,
+    max_output_tokens: u32,
+    instructions: String,
+    usage: Mutex<TokenUsage>,
 }
 impl LlmClient {
     pub fn new(config: &AiConfig) -> Result<Self, &'static str> {
@@ -173,6 +196,13 @@ impl LlmClient {
             api,
             secrets,
             request_timeout,
+            reasoning_effort: config
+                .reasoning_effort
+                .clone()
+                .or_else(|| config.model.starts_with("gpt-6").then(|| "low".into())),
+            max_output_tokens: config.max_output_tokens,
+            instructions: format!("{INSTRUCTIONS}\n{}", prompt_instructions()),
+            usage: Mutex::new(TokenUsage::default()),
         })
     }
     pub fn decide(&self, decision: &Decision) -> Result<usize, &'static str> {
@@ -221,6 +251,7 @@ impl LlmClient {
         }
         let response: Value =
             serde_json::from_slice(&body).map_err(|_| "Invalid LLM response JSON")?;
+        self.log_usage(&response);
         match self.api {
             Api::Responses => parse_action(&response),
             Api::ChatCompletions => parse_chat_action(&response),
@@ -266,17 +297,84 @@ impl LlmClient {
             // Plain messages avoid assuming optional structured-output extensions
             // on a private server. The same strict ID parser/retry logic applies.
             return json!({ "model": self.model, "stream": false,
-                "messages": [ {"role":"system", "content":INSTRUCTIONS},
-                    {"role":"user", "content":serde_json::to_string(decision).expect("serializable decision")} ] });
+                "messages": [ {"role":"system", "content":self.instructions},
+                    {"role":"user", "content":serde_json::to_string(&decision.prompt()).expect("serializable decision")} ] });
         }
-        json!({
-            "model": self.model, "store": false,
-            "instructions": INSTRUCTIONS,
-            "input": [{"role":"user", "content": serde_json::to_string(decision).expect("serializable decision")}],
+        let mut request = json!({
+            "model": self.model, "store": false, "max_output_tokens": self.max_output_tokens,
+            "input": [{"role":"developer", "content":self.instructions},
+                {"role":"user", "content": serde_json::to_string(&decision.prompt()).expect("serializable decision")}],
             "text": {"format": {"type":"json_schema", "name":"game_action", "strict":true,
-                "schema":{"type":"object", "properties":{"action_id":{"type":"integer", "minimum":0, "maximum":decision.actions.len().saturating_sub(1)}},
+                "schema":{"type":"object", "properties":{"action_id":{"type":"integer", "minimum":0}},
                     "required":["action_id"], "additionalProperties":false}}}
+        });
+        if let Some(effort) = &self.reasoning_effort {
+            request["reasoning"] = json!({"effort":effort});
+        }
+        request
+    }
+    fn log_usage(&self, response: &Value) {
+        if let Some(usage) = TokenUsage::from_response(response) {
+            let mut total = self.usage.lock().unwrap();
+            total.add(&usage);
+            let _ = writeln!(
+                std::io::stdout().lock(),
+                "AI tokens: input={} (cached={}), output={} (reasoning={}); session total: input={}, cached={}, output={}, reasoning={}, responses={}",
+                usage.input,
+                usage.cached,
+                usage.output,
+                usage.reasoning,
+                total.input,
+                total.cached,
+                total.output,
+                total.reasoning,
+                total.responses
+            );
+        }
+    }
+}
+
+#[derive(Default)]
+struct TokenUsage {
+    input: u64,
+    cached: u64,
+    output: u64,
+    reasoning: u64,
+    responses: u64,
+}
+impl TokenUsage {
+    fn from_response(response: &Value) -> Option<Self> {
+        let usage = response.get("usage")?;
+        let input = usage
+            .get("input_tokens")
+            .or_else(|| usage.get("prompt_tokens"))?
+            .as_u64()?;
+        let output = usage
+            .get("output_tokens")
+            .or_else(|| usage.get("completion_tokens"))?
+            .as_u64()?;
+        Some(Self {
+            input,
+            output,
+            responses: 1,
+            cached: usage
+                .pointer("/input_tokens_details/cached_tokens")
+                .or_else(|| usage.pointer("/prompt_tokens_details/cached_tokens"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            reasoning: usage
+                .pointer("/output_tokens_details/reasoning_tokens")
+                .or_else(|| usage.pointer("/completion_tokens_details/reasoning_tokens"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
         })
+    }
+    fn add(&mut self, other: &Self) {
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.cached = self.cached.saturating_add(other.cached);
+        self.reasoning = self.reasoning.saturating_add(other.reasoning);
+        self.responses = self.responses.saturating_add(other.responses);
     }
 }
 
@@ -382,6 +480,94 @@ mod tests {
         observer.decision(0).unwrap()
     }
     #[test]
+    fn cost_controls_and_static_prefix_are_stable_between_turns() {
+        let mut config = local_config("http://localhost:8000/v1");
+        config.model = "gpt-6.2-sol".into();
+        config.openai_api_key = "CLOUD_TEST_KEY".into();
+        let client = LlmClient::new(&config).unwrap();
+        let first = decision_fixture();
+        let mut second = first.clone();
+        second.actions.pop();
+        second.observation.ply += 1;
+        let request = client.request(&first);
+        let next = client.request(&second);
+        assert_eq!(request["reasoning"]["effort"], "low");
+        assert_eq!(request["max_output_tokens"], 4096);
+        assert_eq!(request["input"][0]["role"], "developer");
+        assert_eq!(request["input"][0], next["input"][0]);
+        assert_eq!(request["text"], next["text"]);
+        assert!(request.get("instructions").is_none());
+        config.reasoning_effort = Some("high".into());
+        config.max_output_tokens = 8192;
+        let request = LlmClient::new(&config).unwrap().request(&first);
+        assert_eq!(request["reasoning"]["effort"], "high");
+        assert_eq!(request["max_output_tokens"], 8192);
+        config.model = "gpt-4.1-mini".into();
+        config.reasoning_effort = None;
+        assert!(
+            LlmClient::new(&config)
+                .unwrap()
+                .request(&first)
+                .get("reasoning")
+                .is_none()
+        );
+    }
+    #[test]
+    fn token_accounting_includes_reasoning_and_cached_inputs_for_both_apis() {
+        let response = json!({"usage":{"input_tokens":1000,"input_tokens_details":{"cached_tokens":800},"output_tokens":150,"output_tokens_details":{"reasoning_tokens":120}}});
+        let usage = TokenUsage::from_response(&response).unwrap();
+        assert_eq!(
+            (usage.input, usage.cached, usage.output, usage.reasoning),
+            (1000, 800, 150, 120)
+        );
+        let local = json!({"usage":{"prompt_tokens":500,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":200}}});
+        let mut total = TokenUsage::default();
+        total.add(&usage);
+        total.add(&TokenUsage::from_response(&local).unwrap());
+        assert_eq!(
+            (
+                total.input,
+                total.cached,
+                total.output,
+                total.reasoning,
+                total.responses
+            ),
+            (1500, 1000, 170, 120, 2)
+        );
+        assert!(TokenUsage::from_response(&json!({"usage":null})).is_none());
+    }
+    #[test]
+    fn compact_prompts_reduce_deployment_and_playing_context_size() {
+        let config = local_config("http://localhost:8000/v1");
+        let client = LlmClient::new(&config).unwrap();
+        let cfg = crate::Config::default();
+        let mut game = crate::Game::new(0, &cfg);
+        game.start(0, &cfg);
+        for deploying in [true, false] {
+            if !deploying {
+                game.apply(0, crate::Action::AutoPlace, 0, &cfg).unwrap();
+                game.apply(1, crate::Action::AutoPlace, 0, &cfg).unwrap();
+                game.phase = crate::Phase::Playing;
+                game.turn = 0;
+            }
+            let mut observer = super::super::Observer::default();
+            observer.observe(&game.view(0, "size", 0)).unwrap();
+            let decision = observer.decision(0).unwrap();
+            let old = serde_json::to_string(&decision).unwrap().len() + INSTRUCTIONS.len();
+            let new = serde_json::to_string(&decision.prompt()).unwrap().len()
+                + client.instructions.len();
+            println!(
+                "{} prompt bytes: before={old}, after={new}, reduction={} percent",
+                if deploying { "Deployment" } else { "Playing" },
+                100 - new * 100 / old
+            );
+            assert!(
+                new * 100 < old * 65,
+                "compact context should cut more than 35% of prompt bytes"
+            );
+        }
+    }
+    #[test]
     fn local_timeout_is_configurable_and_cloud_keeps_its_existing_limit() {
         let mut config = local_config("http://localhost:8000/v1");
         assert_eq!(
@@ -450,7 +636,7 @@ mod tests {
         assert!(request.get("store").is_none());
         let observation: Value =
             serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
-        assert!(observation["observation"]["board"][60]["piece"]["rank"].is_null());
+        assert!(observation["observation"]["board"][60][1].is_null());
         let encoded = request.to_string();
         assert!(!encoded.contains("PRIVATE_TEST_KEY"));
         assert!(!encoded.contains("UNUSED_CLOUD_TEST_KEY"));
@@ -539,7 +725,7 @@ mod tests {
                 let decision: Value =
                     serde_json::from_str(request["messages"][1]["content"].as_str().unwrap())
                         .unwrap();
-                assert!(decision["observation"]["board"][60]["piece"]["rank"].is_null());
+                assert!(decision["observation"]["board"][60][1].is_null());
                 let response = if status == 200 {
                     json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"{\"action_id\":0}"}}]})
                 } else { json!({"error":{"message":"PRIVATE_TEST_KEY"}}) }.to_string();
@@ -642,8 +828,8 @@ mod tests {
                 let request: Value = serde_json::from_slice(&body).unwrap();
                 assert!(!String::from_utf8_lossy(&body).contains(secret));
                 let decision: Value =
-                    serde_json::from_str(request["input"][0]["content"].as_str().unwrap()).unwrap();
-                assert!(decision["observation"]["board"][60]["piece"]["rank"].is_null());
+                    serde_json::from_str(request["input"][1]["content"].as_str().unwrap()).unwrap();
+                assert!(decision["observation"]["board"][60][1].is_null());
                 assert_eq!(request["store"], false);
                 let response = if status == 200 {
                     json!({"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"{\"action_id\":0}"}]}]})
