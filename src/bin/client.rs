@@ -161,9 +161,30 @@ struct Painted;
 #[derive(Component)]
 struct InputCaret(Instant);
 
-fn blink_input_caret(mut carets: Query<(&InputCaret, &mut TextColor)>) {
-    for (caret, mut color) in &mut carets {
-        color.0 = if caret.0.elapsed().as_millis() % 1000 < 500 {
+fn position_input_caret(
+    texts: Query<(&bevy::text::TextLayoutInfo, &GlobalTransform), Without<InputCaret>>,
+    mut carets: Query<(
+        &InputCaret,
+        &ChildOf,
+        &mut Transform,
+        &mut GlobalTransform,
+        &mut Sprite,
+    )>,
+) {
+    for (caret, parent, mut transform, mut global, mut sprite) in &mut carets {
+        let Ok((layout, parent_global)) = texts.get(parent.parent()) else {
+            continue;
+        };
+        // Use the exact shaped advance, including spaces, rather than a caret
+        // glyph's ink bearing or the rounded text bounding box.
+        transform.translation.x = layout
+            .run_geometry
+            .iter()
+            .map(|run| run.bounds.max.x)
+            .fold(0., f32::max)
+            / layout.scale_factor.max(f32::EPSILON);
+        *global = parent_global.mul_transform(*transform);
+        sprite.color = if caret.0.elapsed().as_millis() % 1000 < 500 {
             Color::srgb(0.94, 0.88, 0.74)
         } else {
             Color::NONE
@@ -544,6 +565,12 @@ fn main() {
     app.add_plugins(client_assets::EmbeddedArtPlugin)
         .add_systems(Startup, setup)
         .add_systems(
+            PostUpdate,
+            position_input_caret
+                .after(bevy::text::Text2dUpdateSystems)
+                .before(bevy::camera::visibility::VisibilitySystems::CheckVisibility),
+        )
+        .add_systems(
             Update,
             (
                 receive,
@@ -551,7 +578,6 @@ fn main() {
                 animate_motion,
                 input,
                 paint,
-                blink_input_caret,
                 clock_text,
                 screenshot,
             )
@@ -1353,13 +1379,9 @@ fn paint(
             if c.field == i && (i == 1 || (!c.connecting && c.tx.is_none())) {
                 cmd.entity(value_label).with_children(|parent| {
                     parent.spawn((
-                        TextSpan::new("│"),
-                        TextFont {
-                            font: art.font.clone(),
-                            font_size: 16. * scale,
-                            ..default()
-                        },
-                        TextColor(ink),
+                        Sprite::from_color(ink, Vec2::new(scale, 16. * scale)),
+                        Anchor::CENTER_LEFT,
+                        Transform::from_xyz(0., 0., 0.1),
                         InputCaret(Instant::now()),
                     ));
                 });
@@ -2446,6 +2468,50 @@ mod tests {
                         assert!(actions.try_recv().is_err());
                     }
                 }
+            }
+        }
+    }
+    #[test]
+    fn caret_uses_fractional_text_advance_without_glyph_padding_or_dpi_drift() {
+        for dpi in [0.75, 1., 2.] {
+            let mut app = App::new();
+            app.add_systems(Update, position_input_caret);
+            let parent = app
+                .world_mut()
+                .spawn(bevy::text::TextLayoutInfo {
+                    scale_factor: dpi,
+                    // The rounded bounding box must not determine the caret position.
+                    size: Vec2::new(33., 20.),
+                    run_geometry: vec![bevy::text::RunGeometry {
+                        bounds: Rect::new(0., 0., 32.375 * dpi, 20. * dpi),
+                        ..default()
+                    }],
+                    ..default()
+                })
+                .id();
+            app.world_mut()
+                .entity_mut(parent)
+                .insert(GlobalTransform::default());
+            let caret = app
+                .world_mut()
+                .spawn((
+                    InputCaret(Instant::now()),
+                    ChildOf(parent),
+                    Transform::default(),
+                    Sprite::from_color(Color::WHITE, Vec2::ONE),
+                ))
+                .id();
+            for advance in [32.375, 38.125, 0.] {
+                app.world_mut()
+                    .get_mut::<bevy::text::TextLayoutInfo>(parent)
+                    .unwrap()
+                    .run_geometry[0]
+                    .bounds
+                    .max
+                    .x = advance * dpi;
+                app.update();
+                let position = app.world().get::<Transform>(caret).unwrap();
+                assert!((position.translation.x - advance).abs() < 0.001);
             }
         }
     }
