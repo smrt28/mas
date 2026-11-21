@@ -114,7 +114,6 @@ struct Painted;
 enum Clock {
     Yours,
     Opponent,
-    Delay,
     Setup,
 }
 #[derive(Component)]
@@ -1152,12 +1151,9 @@ fn count_label(
 }
 fn clock_panels(cmd: &mut Commands, art: &Art, view: &View, layout: plan::Layout) {
     let top = layout.height / 2.;
-    let width = layout.width / 3.;
+    let width = layout.width / 2.;
     let playing = matches!(view.phase, Phase::Playing);
-    for (i, role) in [Clock::Yours, Clock::Opponent, Clock::Delay]
-        .into_iter()
-        .enumerate()
-    {
+    for (i, role) in [Clock::Yours, Clock::Opponent].into_iter().enumerate() {
         let left = -layout.width / 2. + i as f32 * width;
         let active = playing
             && match role {
@@ -1182,12 +1178,11 @@ fn clock_panels(cmd: &mut Commands, art: &Art, view: &View, layout: plan::Layout
         if active {
             cmd.entity(panel).insert(ActiveClock);
         }
-        let caption = match role {
-            Clock::Yours => "Your time",
-            Clock::Opponent => "Opponent's time",
-            Clock::Delay if playing && view.turn == view.you => "Turn delay · you",
-            Clock::Delay if playing => "Turn delay · opp.",
-            _ => "Turn delay",
+        let caption = match (role, active) {
+            (Clock::Yours, true) => "Your time · turn delay",
+            (Clock::Opponent, true) => "Opponent's time · turn delay",
+            (Clock::Yours, false) => "Your time",
+            _ => "Opponent's time",
         };
         label(
             cmd,
@@ -1208,7 +1203,7 @@ fn clock_panels(cmd: &mut Commands, art: &Art, view: &View, layout: plan::Layout
                 } else {
                     art.font.clone()
                 },
-                font_size: 22.,
+                font_size: (width / 9.).clamp(14., 22.),
                 ..default()
             },
             TextColor(if active {
@@ -1898,6 +1893,15 @@ fn format_main_time(ms: u64) -> String {
     let tenths = ms.div_ceil(100);
     format!("{}:{:02}.{}", tenths / 600, (tenths / 10) % 60, tenths % 10)
 }
+fn player_clock_text(clocks: ClockView, owner: usize, active: bool) -> String {
+    let main = format_main_time(clocks.main_ms[owner]);
+    if active {
+        let tenths = clocks.delay_ms.div_ceil(100);
+        format!("{main} ({}.{:01}s)", tenths / 10, tenths % 10)
+    } else {
+        main
+    }
+}
 fn clock_text(c: Res<Client>, mut texts: Query<(&Clock, &mut Text2d)>) {
     if let Some(v) = &c.view {
         let elapsed = if c.broken {
@@ -1908,13 +1912,16 @@ fn clock_text(c: Res<Client>, mut texts: Query<(&Clock, &mut Text2d)>) {
         let clocks = v.clock_after(elapsed);
         for (role, mut text) in &mut texts {
             text.0 = match role {
-                Clock::Yours => format_main_time(clocks.main_ms[v.you]),
-                Clock::Opponent => format_main_time(clocks.main_ms[1 - v.you]),
-                Clock::Delay if matches!(v.phase, Phase::Playing) => {
-                    let tenths = clocks.delay_ms.div_ceil(100);
-                    format!("{}.{:01}s", tenths / 10, tenths % 10)
-                }
-                Clock::Delay => "—".into(),
+                Clock::Yours => player_clock_text(
+                    clocks,
+                    v.you,
+                    matches!(v.phase, Phase::Playing) && v.turn == v.you,
+                ),
+                Clock::Opponent => player_clock_text(
+                    clocks,
+                    1 - v.you,
+                    matches!(v.phase, Phase::Playing) && v.turn != v.you,
+                ),
                 Clock::Setup => format!(
                     "Setup {}",
                     format_main_time(v.remaining_ms.saturating_sub(elapsed))
@@ -2821,9 +2828,9 @@ mod tests {
                                 .phase,
                             Phase::Placement
                         ) {
-                            4
-                        } else {
                             3
+                        } else {
+                            2
                         }
                     );
                     for (role, clock) in clocks {
@@ -3172,18 +3179,24 @@ mod tests {
                         .id();
                     app.update();
                     let mut labels = app.world_mut().query::<&Text2d>();
-                    assert!(labels.iter(app.world()).any(|text| text.0 == "Your time"));
                     assert!(
                         labels
                             .iter(app.world())
-                            .any(|text| text.0 == "Opponent's time")
+                            .any(|text| text.0.starts_with("Your time"))
+                    );
+                    assert!(
+                        labels
+                            .iter(app.world())
+                            .any(|text| text.0.starts_with("Opponent's time"))
                     );
                     let delay_label = if turn == you {
-                        "Turn delay · you"
+                        "Your time · turn delay"
                     } else {
-                        "Turn delay · opp."
+                        "Opponent's time · turn delay"
                     };
                     assert!(labels.iter(app.world()).any(|text| text.0 == delay_label));
+                    let mut clocks = app.world_mut().query::<&Clock>();
+                    assert_eq!(clocks.iter(app.world()).count(), 2);
                     assert_eq!(
                         labels
                             .iter(app.world())
@@ -3195,7 +3208,7 @@ mod tests {
                         .query_filtered::<&Transform, With<ActiveClock>>();
                     let active = highlights.single(app.world()).unwrap();
                     assert!(
-                        (active.translation.x - if turn == you { -w / 3. } else { 0. }).abs()
+                        (active.translation.x - if turn == you { -w / 4. } else { w / 4. }).abs()
                             < 0.001
                     );
                     let point = claim_button(layout).center();
@@ -3270,7 +3283,6 @@ mod tests {
                     .world_mut()
                     .spawn((Clock::Opponent, Text2d::new("")))
                     .id();
-                let delay = app.world_mut().spawn((Clock::Delay, Text2d::new(""))).id();
                 app.update();
                 let elapsed = app
                     .world()
@@ -3285,26 +3297,42 @@ mod tests {
                     .as_ref()
                     .unwrap()
                     .clock_after(elapsed);
-                let yours_ms = clocks.main_ms[you];
-                let opponent_ms = clocks.main_ms[1 - you];
                 // The inactive clock is unchanged; only the active main clock
                 // pays the elapsed portion beyond the snapshot's 500ms delay.
                 assert_eq!(
                     app.world().get::<Text2d>(yours).unwrap().0,
-                    format_main_time(yours_ms)
+                    player_clock_text(clocks, you, turn == you)
                 );
                 assert_eq!(
                     app.world().get::<Text2d>(opponent).unwrap().0,
-                    format_main_time(opponent_ms)
+                    player_clock_text(clocks, 1 - you, turn != you)
                 );
-                assert_eq!(app.world().get::<Text2d>(delay).unwrap().0, "0.0s");
+                let active = if turn == you { yours } else { opponent };
+                let inactive = if turn == you { opponent } else { yours };
+                assert!(
+                    app.world()
+                        .get::<Text2d>(active)
+                        .unwrap()
+                        .0
+                        .ends_with(" (0.0s)")
+                );
+                assert!(!app.world().get::<Text2d>(inactive).unwrap().0.contains('('));
                 assert_eq!(clocks.main_ms[1 - turn], [90_000, 120_000][1 - turn]);
                 assert!(clocks.main_ms[turn] <= [89_000, 119_000][turn]);
                 app.world_mut().resource_mut::<Client>().broken = true;
                 app.update();
                 assert_eq!(
                     app.world().get::<Text2d>(yours).unwrap().0,
-                    format_main_time([90_000, 120_000][you])
+                    player_clock_text(
+                        *app.world()
+                            .resource::<Client>()
+                            .view
+                            .as_ref()
+                            .unwrap()
+                            .clocks,
+                        you,
+                        turn == you
+                    )
                 );
             }
         }
