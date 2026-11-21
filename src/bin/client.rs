@@ -73,6 +73,44 @@ impl WaitingLayout {
             login,
         }
     }
+    fn positioned(surface: plan::Layout, offset: Vec2) -> (Self, Vec2) {
+        let mut panel = Self::new(surface);
+        let bounds = panel.bounds();
+        let offset = Vec2::new(
+            offset.x.clamp(
+                -surface.width / 2. - bounds.left,
+                surface.width / 2. - bounds.left - bounds.width,
+            ),
+            offset.y.clamp(
+                -surface.height / 2. - bounds.top,
+                surface.height / 2. - bounds.top - bounds.height,
+            ),
+        );
+        panel.login.x += offset.x;
+        panel.login.game_y += offset.y;
+        panel.login.server_y += offset.y;
+        panel.login.enter_y += offset.y;
+        panel.header_y += offset.y;
+        panel.pager_y += offset.y;
+        (panel, offset)
+    }
+    fn bounds(&self) -> plan::Rect {
+        let bottom = self.login.game_y - 82. * self.login.scale;
+        plan::Rect {
+            left: self.login.x - 191. * self.login.scale,
+            top: bottom,
+            width: 382. * self.login.scale,
+            height: self.header_y + 24. * self.login.scale - bottom,
+        }
+    }
+    fn title_bar(&self) -> plan::Rect {
+        plan::Rect {
+            left: self.bounds().left,
+            top: self.header_y - 16. * self.login.scale,
+            width: self.bounds().width,
+            height: 40. * self.login.scale,
+        }
+    }
     fn row(&self, i: usize) -> plan::Rect {
         plan::Rect {
             left: self.login.x - self.login.width / 2.,
@@ -221,6 +259,8 @@ struct Client {
     lobby: Lobby,
     join_waiting: bool,
     auto_join: bool,
+    lobby_offset: Vec2,
+    lobby_drag: Option<Vec2>,
     motion: Option<MovePlayback>,
 }
 impl Client {
@@ -258,6 +298,7 @@ impl Client {
         self.error.clear();
         self.connecting = false;
         self.auto_join = false;
+        self.lobby_drag = None;
         self.lobby = Lobby::default();
         self.dirty = true;
     }
@@ -464,6 +505,8 @@ fn main() {
         lobby: Lobby::default(),
         join_waiting: false,
         auto_join: false,
+        lobby_offset: Vec2::ZERO,
+        lobby_drag: None,
         motion: None,
     };
     if autojoin {
@@ -794,6 +837,9 @@ fn input(
     } else {
         text.clear();
     }
+    if !mouse.pressed(MouseButton::Left) || c.view.is_some() {
+        c.lobby_drag = None;
+    }
     let Some(window) = window else {
         return;
     };
@@ -807,9 +853,21 @@ fn input(
     let clicked = mouse.just_pressed(MouseButton::Left);
     let right = mouse.just_pressed(MouseButton::Right);
     if c.view.is_none() {
-        let login = login_layout(surface.layout);
+        let (waiting, offset) = WaitingLayout::positioned(surface.layout, c.lobby_offset);
+        if clicked && waiting.title_bar().contains(cursor_point) {
+            c.lobby_drag = Some(pos - offset);
+        }
+        if let Some(anchor) = c.lobby_drag {
+            let (_, offset) = WaitingLayout::positioned(surface.layout, pos - anchor);
+            if c.lobby_offset != offset {
+                c.lobby_offset = offset;
+                c.dirty = true;
+            }
+            // Dragging the header must never activate a game or form control.
+            return;
+        }
+        let login = &waiting.login;
         if clicked && c.tx.is_some() {
-            let waiting = WaitingLayout::new(surface.layout);
             let page = waiting.page(&c.lobby);
             if c.lobby.address == c.address {
                 for i in 0..waiting.rows {
@@ -1216,7 +1274,8 @@ fn paint(
     let ink = Color::srgb(0.94, 0.88, 0.74);
     let gold = Color::srgb(0.94, 0.67, 0.32);
     let Some(v) = &c.view else {
-        let login = login_layout(surface.layout);
+        let (waiting, _) = WaitingLayout::positioned(surface.layout, c.lobby_offset);
+        let login = &waiting.login;
         let scale = login.scale;
         let cover_width =
             (surface.layout.width - 90.).min((surface.layout.height - 90.) * 1532. / 1027.);
@@ -1229,7 +1288,6 @@ fn paint(
             cover_width * 1027. / 1532.,
             0.,
         );
-        let waiting = WaitingLayout::new(surface.layout);
         let panel_bottom = login.game_y - 82. * scale;
         let panel_top = waiting.header_y + 24. * scale;
         rect(
@@ -1365,7 +1423,7 @@ fn paint(
                 &art,
                 shortened(&c.error, 44),
                 login.x - login.width / 2.,
-                login.game_y - 112. * scale,
+                login.game_y - 70. * scale,
                 13. * scale,
                 gold,
             );
@@ -2007,6 +2065,8 @@ mod tests {
             lobby: Lobby::default(),
             join_waiting: false,
             auto_join: false,
+            lobby_offset: Vec2::ZERO,
+            lobby_drag: None,
             motion: None,
         };
         (client, events_tx, actions_rx)
@@ -2386,6 +2446,108 @@ mod tests {
                         assert!(actions.try_recv().is_err());
                     }
                 }
+            }
+        }
+    }
+    #[test]
+    fn lobby_header_drags_clamps_and_keeps_join_targets_aligned_after_resize() {
+        for (w, h) in [(360., 480.), (600., 925.), (1280., 900.)] {
+            for dpi in [1., 2.] {
+                let (mut client, _, actions) = fixture();
+                client.lobby.games = vec!["Drag match".into()];
+                let layout = plan::Layout::new(w, h);
+                let mut app = App::new();
+                app.insert_resource(client)
+                    .insert_resource(Surface {
+                        layout,
+                        playing: Some(false),
+                    })
+                    .init_resource::<ButtonInput<KeyCode>>()
+                    .init_resource::<ButtonInput<MouseButton>>()
+                    .add_message::<KeyboardInput>()
+                    .insert_resource(Art {
+                        font: default(),
+                        bold_font: default(),
+                        ranks: vec![Handle::default(); 11],
+                        board: default(),
+                        cover: default(),
+                    })
+                    .add_systems(Update, (input, paint).chain());
+                let mut window = Window::default();
+                window.resolution.set_scale_factor_override(Some(dpi));
+                window.resolution.set(w, h);
+                let window = app.world_mut().spawn(window).id();
+                let (panel, _) = WaitingLayout::positioned(layout, Vec2::ZERO);
+                let header = panel.title_bar().center();
+                app.world_mut()
+                    .get_mut::<Window>(window)
+                    .unwrap()
+                    .set_cursor_position(Some(Vec2::new(header.x + w / 2., h / 2. - header.y)));
+                app.world_mut()
+                    .resource_mut::<ButtonInput<MouseButton>>()
+                    .press(MouseButton::Left);
+                app.update();
+                assert!(app.world().resource::<Client>().lobby_drag.is_some());
+                // Keep the button held without another press; move beyond every edge.
+                app.world_mut()
+                    .resource_mut::<ButtonInput<MouseButton>>()
+                    .clear();
+                for point in [Vec2::new(-1000., -1000.), Vec2::new(w + 1000., h + 1000.)] {
+                    app.world_mut()
+                        .get_mut::<Window>(window)
+                        .unwrap()
+                        .set_cursor_position(Some(point));
+                    app.update();
+                    let client = app.world().resource::<Client>();
+                    let (panel, _) = WaitingLayout::positioned(layout, client.lobby_offset);
+                    let bounds = panel.bounds();
+                    assert!(bounds.left >= -w / 2. - 0.01);
+                    assert!(bounds.top >= -h / 2. - 0.01);
+                    assert!(bounds.left + bounds.width <= w / 2. + 0.01);
+                    assert!(bounds.top + bounds.height <= h / 2. + 0.01);
+                    assert!(actions.try_recv().is_err());
+                }
+                app.insert_resource(ButtonInput::<MouseButton>::default());
+                app.update();
+                assert!(app.world().resource::<Client>().lobby_drag.is_none());
+                // A smaller window clamps the saved position for both paint and picking.
+                let layout = plan::Layout::new(360., 480.);
+                app.world_mut().resource_mut::<Surface>().layout = layout;
+                app.world_mut().resource_mut::<Client>().dirty = true;
+                app.world_mut()
+                    .get_mut::<Window>(window)
+                    .unwrap()
+                    .resolution
+                    .set(360., 480.);
+                let (panel, _) = WaitingLayout::positioned(
+                    layout,
+                    app.world().resource::<Client>().lobby_offset,
+                );
+                let point = panel.row(0).center();
+                app.world_mut()
+                    .get_mut::<Window>(window)
+                    .unwrap()
+                    .set_cursor_position(Some(Vec2::new(point.x + 180., 240. - point.y)));
+                app.world_mut()
+                    .resource_mut::<ButtonInput<MouseButton>>()
+                    .press(MouseButton::Left);
+                app.update();
+                assert_eq!(
+                    actions.try_recv().unwrap(),
+                    Action::JoinWaiting {
+                        game: "Drag match".into()
+                    }
+                );
+                let mut labels = app.world_mut().query::<(&Text2d, &Transform)>();
+                let (_, position) = labels
+                    .iter(app.world())
+                    .find(|(text, _)| text.0 == "Waiting games")
+                    .unwrap();
+                assert_eq!(position.translation.y, panel.header_y);
+                assert_eq!(
+                    position.translation.x,
+                    panel.login.x - panel.login.width / 2.
+                );
             }
         }
     }
