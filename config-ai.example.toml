@@ -4,3 +4,12 @@ port = 4000
 game = "AI match"
 openai_api_key = "REPLACE_WITH_YOUR_OPENAI_API_KEY"
 model = "gpt-4.1-mini"
+
+# Set the top-level model = "local" to select this provider.
+# baseUrl includes the API prefix; /chat/completions is appended automatically.
+# openai_api_key can be omitted when model = "local".
+[local]
+baseUrl = "http://localhost:8000/v1"
+apiKey = "REPLACE_WITH_YOUR_LOCAL_API_KEY" # Empty string for a server without auth.
+model = "recommended-coder" # Actual model ID served by the private provider.
+timeoutSeconds = 180 # Total local request deadline, including response generation (1..3600).

@@ -1,4 +1,4 @@
-use super::{AiConfig, Decision, Observer, OpenAi};
+use super::{AiConfig, Decision, LlmClient, Observer};
 use crate::{Action, Reply, connection};
 use std::{
     net::{Shutdown, TcpStream},
@@ -22,7 +22,7 @@ impl Drop for Socket {
 /// The network receiver remains live while HTTPS requests run on a worker.
 /// Decisions carry an immutable visible-state identity and are checked again at send time.
 pub fn run(config: AiConfig) -> Result<(), &'static str> {
-    let api = OpenAi::new(&config)?;
+    let api = LlmClient::new(&config)?;
     run_with(config, Arc::new(move |decision| api.decide(decision)))
 }
 type Decide = dyn Fn(&Decision) -> Result<usize, &'static str> + Send + Sync;

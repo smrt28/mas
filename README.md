@@ -148,7 +148,7 @@ The authenticated binary frames described above carry JSON payloads: actions use
 
 Rooms disappear when their last connection leaves. A waiting room expires after its configured lifetime; its occupant sees the result and can leave. A disconnect interrupts an unfinished game without a winner. The remaining player sees a “Broken pike” dialog; OK returns to the main screen. Losing the server connection during a game shows the same dialog. Finished rooms stay available to their occupants until they leave. Unjoined connections time out after 30 seconds. Oversized/malformed frames, excessive command rates and stalled output consumers are disconnected. No game state is written to disk.
 
-### Headless ChatGPT player (Linux)
+### Headless LLM player (Linux)
 
 Build the headless client without Bevy or graphics dependencies:
 
@@ -160,7 +160,25 @@ chmod 600 config-ai.toml
 ./target/release/mas-ai-client config-ai.toml
 ```
 
-The configuration path is the only command-line argument. Use an OpenAI API model that supports the Responses API with structured JSON output. The implementation follows the [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create) and [structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs) formats. The selected model decides deployment placements, readiness, moves, resignations and available time claims from numbered legal actions. OpenAI API usage is billed to the configured API key. No real API request is needed for the automated tests.
+The configuration path is the only command-line argument. For OpenAI, set `model` to a Responses API model that supports structured JSON output and supply `openai_api_key`. The implementation follows the [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create) and [structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs) formats. The selected model decides deployment placements, readiness, moves, resignations and available time claims from numbered legal actions. OpenAI API usage is billed to the configured API key. No real API request is needed for the automated tests.
+
+To use a private OpenAI-compatible server, set the **top-level** `model = "local"` and add:
+
+```toml
+# These fields stay at the top level, before [local].
+hostname = "127.0.0.1"
+port = 4000
+game = "Local AI match"
+model = "local"
+
+[local]
+baseUrl = "http://localhost:8000/v1"
+apiKey = "YOUR_PRIVATE_API_KEY"
+model = "recommended-coder"
+timeoutSeconds = 180
+```
+
+`local.model` is the actual model ID; top-level `model = "local"` only selects the provider. The local API key replaces the OpenAI key, so `openai_api_key` can be omitted in local mode. Use `apiKey = ""` for an unauthenticated server. `baseUrl` includes the API prefix (such as `/v1`); the client appends `/chat/completions`. `timeoutSeconds` sets the local request deadline (default 180 seconds, range 1–3600); connection establishment is limited to 10 seconds. OpenAI requests retain their 60-second deadline. Transport failures print elapsed time, configured limits and the redacted error chain, distinguishing timeouts from connection failures instead of merging them into one message. Private requests use [Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) system/user messages, non-streaming responses, and a JSON-only action instruction, without requiring optional server-side schema extensions. Returned IDs still undergo strict JSON parsing, legality and turn checks, with invalid answers retried. The same filtered view and observation history are used for both providers. HTTPS uses the system's trusted certificate authorities, including installed private CAs, and redirects are disabled. Selecting an OpenAI model again restores the OpenAI endpoint; there is no automatic fallback between providers.
 
 The AI uses the same embedded multiplayer key, authentication and persistent connection worker as the graphical client. Rebuild the server too: the protocol adds a create-only action and public match settings. It creates the configured game, refuses an existing name, and waits for server-pushed opponent/game updates. It keeps receiving updates during API requests, rechecks decisions before sending them, discards stale turns, and retries invalid answers or API errors with a delay. There are no local strategic fallback moves. On completion it logs win/loss/draw; connection errors use fixed diagnostics; AI requests and response bodies are logged to the terminal with API credentials redacted. A disconnected client exits; it does not reconnect into another player's slot.
 
@@ -168,7 +186,7 @@ If authentication succeeds but the connection closes immediately after the game-
 
 Every model request is built from a separate observation object, never a serialized server reply. Both clients share an explicit rank-visibility filter. Opponent deployment is absent, unrevealed opponent ranks remain `null`, and undisplayed deployment counters remain `"?"`. Public remaining counters are derived from captures in the same way as the GUI. The AI receives the public rules, actual match settings, own ranks, visible clocks and filtered combat observations. Combat ranks enter memory only when the GUI would animate them, or when the latest visible combat-detail line legitimately identifies a rank. Completed/missed animations cannot reveal new ranks. The client respects the GUI's animation input pause. History records observations at the time/square they occurred; it does not turn remembered ranks into guaranteed current board information.
 
-`config-ai.toml` is ignored by Git. Keep any other configuration filename private as well. The API key is used only in the HTTPS authorization header; it is never included in prompts, logs, configuration diagnostics or server messages. Every OpenAI request and response body (including API error responses) is printed to the terminal with labeled boundaries and HTTP response status. Credentials echoed in a response are redacted, and authorization headers are never printed. Free-form server text is not logged or replayed into model requests. Requests set `store = false` and use the public OpenAI HTTPS endpoint.
+`config-ai.toml` is ignored by Git. Keep any other configuration filename private as well. The API key is used only in the HTTPS authorization header; it is never included in prompts, logs, configuration diagnostics or server messages. Every selected-provider request and response body (including API error responses) is printed to the terminal with labeled boundaries and HTTP response status. Credentials echoed in a response are redacted, and authorization headers are never printed. Free-form server text is not logged or replayed into model requests. OpenAI requests set `store = false` and use the public OpenAI HTTPS endpoint. Local requests go only to `local.baseUrl`; neither configuration section is included in model prompts.
 
 Run privacy and deterministic tests without sockets, then the Linux TCP/HTTP mock tests:
 

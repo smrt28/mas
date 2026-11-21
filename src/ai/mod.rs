@@ -1,7 +1,7 @@
 //! AI decisions are made exclusively from observations admitted by the UI policy.
 mod openai;
 mod runner;
-pub use openai::{AiConfig, OpenAi};
+pub use openai::{AiConfig, LlmClient};
 pub use runner::run;
 
 use crate::{Action, CELLS, MatchSettings, Phase, Rank, View, blocked, home, square, visibility};
